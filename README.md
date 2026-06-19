@@ -105,18 +105,27 @@ variables `MSBUILD_PATH`, `NANT_BIN`, and `AWS_DEFAULT_REGION` are set.
 GitHub NuGet source is added; the server config from `cfg.zip` is applied (`TCPCONN.XML` with
 `Integrated` set to true, the hub configs, and the trimmed `company-connection-map.xml`); the
 server and client are built; a test database is restored; the SQL logins are created; and
-nginx is installed as a Windows service.
+nginx is installed as a Windows service. Git and `sqlcmd` are placed on the PATH for the build
+and restore steps (they land on the machine PATH only after their installers finish, so a
+shell that started earlier won't otherwise see them).
+
+**Per-server config:** each launcher reads config from a per-server directory
+(`server\Src\Interface\<Server>\cfg`), not the shared `cfg` where `cfg.zip` is applied, so the
+build copies the applied config into each per-server directory. Without this, every server
+falls back to a default that uses port 8008 and they collide. It also strips the `xsd`/`xsi`
+XML namespaces from `AppServerApi.config`, because AppServerApi targets .NET 10, whose config
+loader rejects XML namespaces (the .NET Framework servers tolerate them).
 
 **Servers:** all four WebEdition servers start on every boot through a scheduled task
 (`TCPStartServers`), so the full stack is up after the build, after a reboot, and in an
 exported OVA. Server logs are written to `D:\Tools\serverlogs`.
 
-| Server | Role |
-|---|---|
-| `AppServerApi` | Employee, manager, and webclock backend. Web UI at `http://localhost:8081/app/manager` |
-| `AdmServerApi` | Administration. Web UI at `http://localhost:8018/app/admin` |
-| `TerminalHubApi` | Hub that networked clock devices (linclock, winclock, RDTg, POS) connect to |
-| `WorkstationHubApi` | Hub for workstation-attached terminals and biometric readers |
+| Server | Port | Role |
+|---|---|---|
+| `AppServerApi` | 8008 | Employee, manager, and webclock backend (targets .NET 10). Web UI at `http://localhost:8081/app/manager` |
+| `TerminalHubApi` | 8010 | Hub that networked clock devices (linclock, winclock, RDTg, POS) connect to |
+| `AdmServerApi` | 8012 | Administration. Web UI at `http://localhost:8018/app/admin` |
+| `WorkstationHubApi` | 8014 | Hub for workstation-attached terminals and biometric readers |
 
 The staged credentials are deleted from the guest after use, so an exported OVA carries none.
 

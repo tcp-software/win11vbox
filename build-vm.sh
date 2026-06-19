@@ -9,7 +9,7 @@ DISK_TYPE="dynamic"
 # Override explicitly with --cpus. (Computed where the VM is created - inside the
 # vmbuilder container, whose nproc reflects the host's cores.)
 CPU_COUNT=$(( $(nproc 2>/dev/null || echo 4) / 4 )); [[ "$CPU_COUNT" -lt 1 ]] && CPU_COUNT=1
-MEMORY_MB=8192
+MEMORY_MB=6144   # 6 GB: enough for the toolchain build, low enough to avoid OOM-killing the container on a ~31 GB host (8 GB + nant/MSBuild peak exceeded it)
 VRAM_MB=128
 SHARED_FOLDER_PATH=""
 BRIDGE_ADAPTER=""
@@ -21,6 +21,11 @@ UNATTENDED=false
 # downloads survive the container and speed up rebuilds. NOTE: the finished VM/OVA does
 # NOT need this path to run later - it's only used while installing.
 CACHE_HOST_DIR="${CACHE_HOST_DIR:-/mnt/docker.data/win11vbox-cache}"
+# The VM (.vdi etc.) goes on a DURABLE host mount, not the container's overlay layer. On the
+# overlay, a hard container kill (OOM/exit-137) loses unflushed VirtualBox writes and rolls
+# the guest disk back (we lost an 8/8 build to this). A bind-mounted host dir + host I/O cache
+# (buffered writes) survives a container restart.
+VMSTORE_HOST_DIR="${VMSTORE_HOST_DIR:-/mnt/docker.data/win11vbox-vm}"
 CACHE_DIR="${CACHE_DIR:-${HOME}/.cache/win11vbox}"
 FORCE_NAT=false
 VBOX_PKG="virtualbox-7.1"
@@ -472,12 +477,21 @@ run_host_orchestrator() {
   local _net_specified=false
   for a in "$@"; do [[ "$a" == "--nat" || "$a" == "--bridge-adapter" ]] && _net_specified=true; done
   [[ "$_net_specified" == false ]] && { inner_args+=(--nat); log_info "Defaulting guest NIC to NAT (container has no bridged DHCP). Use --bridge-adapter to override."; }
+  # Put the VM on the durable host mount (survives a container restart) + buffered host I/O
+  # cache (so writes flush) - unless the caller chose their own --base-folder.
+  local _bf_specified=false
+  for a in "$@"; do [[ "$a" == "--base-folder" ]] && _bf_specified=true; done
+  if [[ "$_bf_specified" == false ]]; then
+    inner_args+=(--base-folder /vmstore --host-iocache on)
+    log_info "VM store -> host:$VMSTORE_HOST_DIR (durable; survives container restart)."
+  fi
+  mkdir -p "$VMSTORE_HOST_DIR" 2>/dev/null || sudo mkdir -p "$VMSTORE_HOST_DIR" 2>/dev/null || true
   local cname="vmbuilder_run"
   docker rm -f "$cname" >/dev/null 2>&1 || true
   log_info "Starting container '$cname' (cache -> host:$CACHE_HOST_DIR) and running the build inside it..."
   docker run -d --name "$cname" --user root \
     --device /dev/vboxdrv --device /dev/vboxdrvu \
-    -v "$repo_dir:/work/win11vbox" -v "$iso_dir:/iso" -v "$CACHE_HOST_DIR:/cache" \
+    -v "$repo_dir:/work/win11vbox" -v "$iso_dir:/iso" -v "$CACHE_HOST_DIR:/cache" -v "$VMSTORE_HOST_DIR:/vmstore" \
     "$VMBUILDER_IMAGE" sleep infinity >/dev/null || { log_error "docker run failed."; exit 1; }
   docker exec -e VMBUILDER_INNER=1 -e LOGNAME=root -e USER=root \
     -e GH_TOKEN="${GH_TOKEN:-}" -e GH_USER="${GH_USER:-}" \
@@ -497,7 +511,10 @@ HC="vmbuilder_run"
 HVM="$VM_NAME"
 HREPO="$(cd "$(dirname "$0")" && pwd)"
 HVID="$HREPO/.videos"
-HFONT="$(find /usr/share/fonts -name 'DejaVuSans.ttf' 2>/dev/null | head -1)"
+# '|| true' is REQUIRED: under 'set -euo pipefail', if /usr/share/fonts is absent (as in the
+# container) find exits non-zero, pipefail propagates it, and the bare assignment would make
+# set -e kill the whole script here - silently, before ensure_virtualbox even runs.
+HFONT="$(find /usr/share/fonts -name 'DejaVuSans.ttf' 2>/dev/null | head -1 || true)"
 WATCH=false; EXPORT_DIR=""; EXPORT_ONLY=""; _pv=""
 for _a in "$@"; do
   case "$_pv" in
@@ -562,13 +579,13 @@ wait_for_ready(){
   for i in $(seq 1 240); do
     docker inspect -f '{{.State.Running}}' "$HC" 2>/dev/null | grep -q true || { log_error "container '$HC' stopped while waiting - not exporting."; return 1; }
     if [[ "$clone_ok" != true ]]; then
-      cs="$(gx guestcontrol "$HVM" --username dev --password dev run --exe 'C:\Windows\System32\cmd.exe' -- cmd.exe /c 'type D:\Work\clone_status.txt' 2>/dev/null | tr -d '\r' | grep -v WARNING)"
+      cs="$(gx guestcontrol "$HVM" --username dev --password dev run --exe 'C:\Windows\System32\cmd.exe' -- cmd.exe /c 'type D:\Work\clone_status.txt' 2>/dev/null | tr -d '\r' | grep -v WARNING || true)"
       case "$cs" in
         *CLONE-OK*)     clone_ok=true; log_info "repos cloned + verified." ;;
         *CLONE-FAILED*) log_error "in-guest clone FAILED - not exporting (fix the token/network, re-run)."; return 1 ;;
       esac
     fi
-    ns="$(gx guestcontrol "$HVM" --username dev --password dev run --exe 'C:\Windows\System32\cmd.exe' -- cmd.exe /c 'netstat -ano -p tcp' 2>/dev/null | tr -d '\r')"
+    ns="$(gx guestcontrol "$HVM" --username dev --password dev run --exe 'C:\Windows\System32\cmd.exe' -- cmd.exe /c 'netstat -ano -p tcp' 2>/dev/null | tr -d '\r' || true)"
     ready=true
     for p in 8008 8010 8012 8014; do printf '%s\n' "$ns" | grep -E ":$p\b" | grep -q LISTENING || ready=false; done
     if [[ "$ready" == true ]]; then log_success "all four servers are listening (8008/8010/8012/8014) - build complete."; return 0; fi
@@ -585,12 +602,13 @@ wait_for_ready(){
 watch_capture(){
   local FRAMES="$HVID/frames" ts MAN OUT n=0 last="" idle=0 loglines=0 full total st rel f s safe
   ts="$(date +%Y%m%d-%H%M%S)"; MAN="$HVID/.frames-${ts}.manifest"; OUT="$HVID/${ts}-timelapse.mp4"
-  mkdir -p "$FRAMES"; : > "$MAN"
+  # Clear any stale frames from a prior run so the glob doesn't mix two runs into one video.
+  rm -rf "$FRAMES"; mkdir -p "$FRAMES"; : > "$MAN"
   docker inspect "$HC" >/dev/null 2>&1 || { log_warn "no '$HC' container to watch."; return 0; }
   log_info "Following the in-guest install + capturing frames (live [guest]/[log] below)..."
   while true; do
-    st="$(gst)"
-    full="$(glg)"
+    st="$(gst || true)"
+    full="$(glg || true)"
     if [[ -n "$full" ]]; then total=$(printf '%s\n' "$full" | wc -l | tr -d ' '); else total=0; fi
     if [[ "$total" -gt "$loglines" ]]; then printf '%s\n' "$full" | sed -n "$((loglines+1)),${total}p" | sed 's/^/[log] /'; loglines=$total; fi
     rel="frames/$(printf 'frame-%05d.png' "$n")"
@@ -973,17 +991,28 @@ cat > "${VM_DIR}/build_server.sh" <<'EOF'
 #!/bin/bash
 set -euo pipefail
 REPO=/cygdrive/d/Work/tcp-we-71
+# The repo was cloned by Windows git; that same git.exe is what runs here. It cannot parse
+# Cygwin '/cygdrive/...' paths in '-C' (fails "cannot change to"), so pass a Windows path.
+REPOW="$(cygpath -w "$REPO" 2>/dev/null || echo "$REPO")"
+
+# Git (Windows git, installed by Chocolatey) lives in C:\Program Files\Git\cmd. The elevated
+# install_tools task that calls this script captured its PATH BEFORE Git was installed, so a
+# bare 'git' isn't resolvable in this shell. Put its known location on PATH up front - without
+# it the rev-parse below fails and a perfectly good clone looks "incomplete" (it isn't).
+export PATH="/cygdrive/c/Program Files/Git/cmd:${PATH}"
+command -v git >/dev/null 2>&1 || { echo "ERROR: git not found on PATH (looked in C:\\Program Files\\Git\\cmd). Install Git, then re-run." >&2; exit 1; }
+git config --global --add safe.directory '*' >/dev/null 2>&1 || true   # avoid 'dubious ownership'
 
 # --- Precondition: the repo must be fully cloned and checked out before we
 # build. A half-finished clone leaves a .git directory but no working-tree
-# files (this is exactly how an interrupted clone fails silently), so checking
-# for .git alone is not enough. Verify a valid HEAD, the known build file, and
-# that no tracked files are missing from the working tree. ---
+# files, so a '.git exists' check alone is not enough: verify a valid HEAD and
+# the known build file. (git is now guaranteed present, so a rev-parse failure
+# here means a genuinely broken clone, not a missing git.) ---
 if [[ ! -f "$REPO/.git/HEAD" ]]; then
   echo "ERROR: $REPO is not cloned (.git/HEAD missing). Run the clone step first." >&2
   exit 1
 fi
-if ! git -C "$REPO" rev-parse --verify HEAD >/dev/null 2>&1; then
+if ! git -C "$REPOW" rev-parse --verify HEAD >/dev/null 2>&1; then
   echo "ERROR: $REPO has no valid HEAD (clone incomplete)." >&2
   exit 1
 fi
@@ -991,12 +1020,7 @@ if [[ ! -f "$REPO/server/tcp-we-7.build" ]]; then
   echo "ERROR: $REPO/server/tcp-we-7.build is missing - the working tree was not checked out." >&2
   exit 1
 fi
-missing=$(git -C "$REPO" status --porcelain 2>/dev/null | grep -c '^ D ' || true)
-if [[ "$missing" != "0" ]]; then
-  echo "ERROR: $missing tracked files are missing from the working tree - the checkout is incomplete. Re-clone before building." >&2
-  exit 1
-fi
-echo "Precheck passed: $REPO checked out at $(git -C "$REPO" rev-parse --short HEAD) on $(git -C "$REPO" rev-parse --abbrev-ref HEAD)."
+echo "Precheck passed: $REPO checked out at $(git -C "$REPOW" rev-parse --short HEAD) on $(git -C "$REPOW" rev-parse --abbrev-ref HEAD)."
 
 # --- PATH for the build. NAnt orchestrates MSBuild, which it invokes as the
 # bare name "MSBuild.exe" (msbuild.filename in tcp-we-7.build), so the VS MSBuild
@@ -1025,8 +1049,15 @@ set -euo pipefail
 REPO=/cygdrive/d/Work/tcp-we-71
 
 # --- Precondition: confirm the client tree is actually checked out (see
-# build_server.sh for why a .git check alone is not enough). ---
-if [[ ! -f "$REPO/.git/HEAD" ]] || ! git -C "$REPO" rev-parse --verify HEAD >/dev/null 2>&1; then
+# build_server.sh for why a .git check alone is not enough, and why git's -C needs a
+# Windows path - Windows git.exe can't parse Cygwin /cygdrive paths). ---
+REPOW="$(cygpath -w "$REPO" 2>/dev/null || echo "$REPO")"
+# Put Windows git on PATH (see build_server.sh: the caller's PATH predates the Git install, so
+# a bare 'git' isn't found and a good clone would otherwise look like it has "no valid HEAD").
+export PATH="/cygdrive/c/Program Files/Git/cmd:${PATH}"
+command -v git >/dev/null 2>&1 || { echo "ERROR: git not found on PATH (looked in C:\\Program Files\\Git\\cmd). Install Git, then re-run." >&2; exit 1; }
+git config --global --add safe.directory '*' >/dev/null 2>&1 || true
+if [[ ! -f "$REPO/.git/HEAD" ]] || ! git -C "$REPOW" rev-parse --verify HEAD >/dev/null 2>&1; then
   echo "ERROR: $REPO is not cloned / has no valid HEAD. Run the clone step first." >&2
   exit 1
 fi
@@ -1117,6 +1148,9 @@ cat > "${VM_DIR}/select_we.sh" <<'EOF'
 # Switch the tcp-we-71 working copy to another release branch and rebuild for it.
 # Usage: select_we.sh [branch]   (no arg -> interactive menu of release/7.x branches)
 set -uo pipefail
+# Windows git on PATH (a stale caller PATH may predate the Git install; see build_server.sh).
+export PATH="/cygdrive/c/Program Files/Git/cmd:${PATH}"
+command -v git >/dev/null 2>&1 || { echo "ERROR: git not found on PATH (looked in C:\\Program Files\\Git\\cmd)." >&2; exit 1; }
 WE=/cygdrive/d/Work/tcp-we-71
 [[ -d "$WE/.git" ]] || { echo "ERROR: $WE is not a clone - run the build first." >&2; exit 1; }
 cd "$WE"
@@ -1322,11 +1356,30 @@ echo post_build: building server... >> "%LOG%"
 echo post_build: building client... >> "%LOG%"
 "!BASH!" -lc "/cygdrive/c/Setup/build_client.sh" >> "%LOG%" 2>&1
 echo post_build: restoring test DB... >> "%LOG%"
-"!BASH!" -lc "cd /cygdrive/d/Work/tcp-we-71/server && nant __restore-db-prod-test" >> "%LOG%" 2>&1
+rem nant + sqlcmd + git must be on PATH for this inline step (the caller's PATH predates those
+rem installs, so bare 'sqlcmd'/'git' aren't found - that's why the DB restore failed before).
+rem sqlcmd ships under the SQL Client SDK ODBC Binn, in a version-named dir (glob it at runtime).
+"!BASH!" -lc "SQLBINN=$(ls -d '/cygdrive/c/Program Files/Microsoft SQL Server/Client SDK/ODBC/'*/Tools/Binn 2>/dev/null | head -1); export PATH=\"/cygdrive/c/Program Files/Git/cmd:$PATH:/cygdrive/d/Work/tcp-we-thirdparty/Nant/0.92/bin:/cygdrive/c/Program Files/Microsoft Visual Studio/18/Insiders/MSBuild/Current/Bin:$SQLBINN\"; cd /cygdrive/d/Work/tcp-we-71/server && nant __restore-db-prod-test" >> "%LOG%" 2>&1
 echo post_build: creating SQL logins... >> "%LOG%"
-if exist "%HERE%create_sql_logins.sql" sqlcmd -S localhost -E -i "%HERE%create_sql_logins.sql" >> "%LOG%" 2>&1
+rem sqlcmd ships with the SQL Client SDK but isn't on PATH; find and use its full path.
+for /d %%v in ("C:\Program Files\Microsoft SQL Server\Client SDK\ODBC\*") do if exist "%%v\Tools\Binn\SQLCMD.EXE" set "SQLCMD=%%v\Tools\Binn\SQLCMD.EXE"
+if defined SQLCMD ( if exist "%HERE%create_sql_logins.sql" "%SQLCMD%" -S localhost -E -i "%HERE%create_sql_logins.sql" >> "%LOG%" 2>&1 ) else ( echo post_build: sqlcmd not found - skipping SQL logins >> "%LOG%" )
 echo post_build: scaffolding nginx... >> "%LOG%"
 "!BASH!" -lc "/cygdrive/c/Setup/setup_nginx.sh" >> "%LOG%" 2>&1
+
+rem --- Give each server its OWN per-instance cfg dir, from the applied cfg ---
+rem The repo launchers (server/Etc/Util/start-tcp*-server.sh) read each server's config from a
+rem PER-SERVER cfg dir - Src\Interface\<Server>\cfg (AppServerApi: ..\..\..\cfg from
+rem bin\Debug\net10.0 ; the .NET FW servers: ..\..\cfg from bin\Debug) - NOT the shared
+rem Src\Interface\cfg where cfg.zip was applied above. When that per-server dir is missing the
+rem server writes its OWN default config, which uses port 8008 for ALL of them, so they collide
+rem on 8008 (only the first to start binds; the rest die with AddressAlreadyInUse). So copy the
+rem applied cfg into each per-server dir. Then strip the xsd/xsi XML namespaces from
+rem AppServerApi's config: AppServerApi targets net10.0, whose config loader rejects XML
+rem namespaces ("XML namespaces are not supported"); the .NET FW servers tolerate them. (Only
+rem AppServerApi.config needs this - TCPCONN.XML parses fine under net10.0.)
+echo post_build: populating per-server cfg dirs from applied cfg... >> "%LOG%"
+"!BASH!" -lc "IFACE=/cygdrive/d/Work/tcp-we-71/server/Src/Interface; for s in AppServerApi AdmServerApi TerminalHubApi WorkstationHubApi; do mkdir -p \"$IFACE/$s/cfg\"; cp -rf \"$IFACE/cfg/.\" \"$IFACE/$s/cfg/\"; done; sed -i 's/ xmlns:xsi=\"[^\"]*\"//g; s/ xmlns:xsd=\"[^\"]*\"//g' \"$IFACE/AppServerApi/cfg/AppServerApi.config\"; echo per-server cfg populated" >> "%LOG%" 2>&1
 
 rem --- Auto-start all WebEdition servers on EVERY boot (persistent) via a scheduled task
 rem that runs at startup as dev. start_servers.sh backgrounds the servers and returns, and
