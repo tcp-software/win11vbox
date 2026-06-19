@@ -1,6 +1,6 @@
 # Windows 11 TimeClock Plus Dev VM Builder
 
-`setup_vm.sh` builds a Windows 11 VirtualBox virtual machine and installs a complete
+`build-vm.sh` builds a Windows 11 VirtualBox virtual machine and installs a complete
 TimeClock Plus WebEdition development environment, hands-free, from a single command.
 
 It runs as an orchestrator on a Linux host: it performs the actual build **inside the
@@ -29,39 +29,39 @@ the container or pulled automatically.
 # Complete hands-free build. GitHub credentials are taken from your gh login; the ISO and
 # server config are pulled from ghcr; the VM is created and Windows + the full toolchain are
 # installed; the repos are cloned and built; and all servers start on boot.
-./setup_vm.sh --unattended -y
+./build-vm.sh --unattended -y
 
 # Supply credentials explicitly instead of relying on the gh login:
-GH_TOKEN=ghp_xxxxxxxx GH_USER=you ./setup_vm.sh --unattended -y
+GH_TOKEN=ghp_xxxxxxxx GH_USER=you ./build-vm.sh --unattended -y
 
 # Build, then export a portable OVA appliance to a durable host folder:
-./setup_vm.sh --unattended --export /mnt/docker.data/win11-ova/win11.ova -y
+./build-vm.sh --unattended --export /mnt/docker.data/win11-ova -y
 
 # Fast end-to-end dry run (dummy installs, ~minutes, no credentials needed) to verify the flow:
-./setup_vm.sh --unattended --dry-run -y
+./build-vm.sh --unattended --dry-run -y
 
 # Resume a half-finished build (just re-run with the same VM name; the in-guest install is idempotent):
-./setup_vm.sh --unattended -y
+./build-vm.sh --unattended -y
 ```
 
 A full real build takes roughly two to three hours (Visual Studio and SQL Server dominate).
 
 ### Live progress and a timelapse video
 
-`run_clean.sh` wraps `setup_vm.sh` and adds a live progress stream plus a screenshot timelapse:
+Add `--watch` for a live progress stream plus an annotated screenshot timelapse:
 
 ```bash
-./run_clean.sh                                   # real build + annotated timelapse video
-./run_clean.sh --dry-run                         # fast validation
-./run_clean.sh --export /mnt/docker.data/win11-ova        # build, then export an OVA
-./run_clean.sh --export-only /mnt/docker.data/win11-ova   # export the already-built VM (no rebuild)
+./build-vm.sh --unattended --watch -y                              # build + annotated timelapse
+./build-vm.sh --unattended --watch --dry-run -y                    # fast validation with video
+./build-vm.sh --unattended --watch --export /mnt/docker.data/win11-ova -y   # build, video, then export
 ```
 
-It streams the host build log (`[build]`), the in-guest install step (`[guest]`), and the
-raw installer log (`[log]`) to the terminal; captures a screenshot every 30 seconds; burns
-the real step into each frame as a caption; and assembles an mp4 under `.videos/`. The whole
-run is also tee'd to `.videos/run_clean-<timestamp>.log`. ffmpeg is resolved automatically
-(PATH, then `~/.local/bin`, then a one-time static download) with no `sudo` required.
+With `--watch`, the run streams the in-guest install step (`[guest]`) and the raw installer
+log (`[log]`) to the terminal; captures a screenshot every 30 seconds; burns the real step
+into each frame as a caption (so the video never looks "stuck" even if the in-guest progress
+window freezes); and assembles an mp4 under `.videos/`. The whole host run is tee'd to
+`.videos/build-vm-<timestamp>.log`. ffmpeg is resolved automatically (PATH, then
+`~/.local/bin`, then a one-time static download) with no `sudo` required.
 
 ## Options
 
@@ -72,7 +72,9 @@ run is also tee'd to `.videos/run_clean-<timestamp>.log`. ffmpeg is resolved aut
 | `--cfg PATH` | `cfg.zip` server config. Optional; auto-pulled from `ghcr.io/tcp-software/we-cfg:latest` if omitted |
 | `--gh-token TOKEN` / `--gh-user USER` | GitHub credentials for the clone and NuGet source. Required for a real run; auto-sourced from the `gh` login or `$GH_TOKEN`/`$GH_USER` |
 | `--aws-access-key KEY` / `--aws-secret-key SECRET` | Optional. Set as guest environment variables only. Not needed to build or run the dev server (AWS is used only by runtime features such as S3 and SES) |
-| `--export FILE.ova` | After the install completes, power off and export a portable OVA |
+| `--watch` | Follow the install live (`[guest]`/`[log]`) and build an annotated screenshot timelapse under `.videos/` |
+| `--export DIR` | After the build, power off and export a portable OVA into host directory `DIR` |
+| `--export-only DIR` | Skip the build; export the VM already in the running container into `DIR` |
 | `--dry-run` | Stage a marker so the in-guest tool install runs dummy steps (each sleeps a few seconds) to verify the whole flow in minutes; no credentials needed |
 | `--cpus N` | vCPUs. Default: host cores / 4 (minimum 1) |
 | `--memory MB` / `--vram MB` | Guest RAM / video RAM. Defaults: 8192 / 128 |
@@ -81,7 +83,7 @@ run is also tee'd to `.videos/run_clean-<timestamp>.log`. ffmpeg is resolved aut
 | `--cache-dir PATH` | In-guest download cache (build-time only). Defaults to a durable host folder so cached installers survive the container and speed up rebuilds |
 | `--shared-folder PATH` | Share a host folder into the guest at `G:` |
 | `--host-iocache on\|off` | Force the VirtualBox host I/O cache. Default: auto (on for overlay, union, and ZFS filesystems) |
-| `--log-file PATH` | Tee a full transcript here. Default: `./setup_vm-<timestamp>.log` |
+| `--log-file PATH` | Tee the in-guest build transcript here. The host run is also logged to `.videos/build-vm-<timestamp>.log` |
 | `--vm-name NAME` / `--base-folder PATH` | VM name and parent directory |
 | `--skip-install` | Do not create a VM; only ensure VirtualBox is installed |
 | `-y`, `--yes` | Do not prompt for confirmation |
@@ -136,10 +138,11 @@ host-only and is used by default only because bridged has no DHCP inside the con
 
 ## Exporting an OVA Appliance
 
-Add `--export FILE.ova` to a build, or export a VM that is already built without rebuilding:
+Add `--export DIR` to a build, or export a VM that is already built without rebuilding:
 
 ```bash
-./run_clean.sh --export-only /mnt/docker.data/win11-ova
+./build-vm.sh --unattended --export /mnt/docker.data/win11-ova -y   # build, then export
+./build-vm.sh --export-only /mnt/docker.data/win11-ova              # export the existing VM, no rebuild
 ```
 
 Export powers the VM off (the servers restart on the next boot), exports the VM to an OVA in
@@ -169,8 +172,12 @@ These need a human because they require an interactive sign-in or a deliberate c
    `ssh-keygen`, then add the key to GitHub).
 4. Optional: add the Cygwin and "Cygwin as Admin" Windows Terminal profiles and the
    `~/.bashrc` / `~/.bash_aliases` convenience configuration.
-5. Optional: a release-branch version switcher for trying different `tcp-we-71` branches.
-6. Take a VM snapshot once everything builds and runs.
+5. Take a VM snapshot once everything builds and runs.
+
+To try a different release branch later, run `C:\Setup\select_we.sh` in Cygwin (no argument
+for an interactive menu of `release/7.x` branches, or pass a branch name). It checks out the
+branch and rebuilds the server, the client, and the test database for that version; then
+restart the servers with `C:\Setup\start_servers.sh all`.
 
 ## Watching Progress and Troubleshooting
 
@@ -180,8 +187,8 @@ These need a human because they require an interactive sign-in or a deliberate c
     run --exe 'C:\Windows\System32\cmd.exe' -- cmd.exe /c "type D:\Tools\install_status.txt"
   ```
   The status protocol in `install_status.txt` is `N/8 <step>`, `WAIT <msg>`, `ERROR <msg>`,
-  or `8/8 Setup complete`. The host build transcript is `./setup_vm-<timestamp>.log`; the full
-  in-guest install log is `D:\Tools\install_tools.log`.
+  or `8/8 Setup complete`. The host run is logged to `.videos/build-vm-<timestamp>.log`; the
+  full in-guest install log is `D:\Tools\install_tools.log`.
 - **`WAIT Network unavailable`** means the guest has no internet. Inside the container that
   means a bridged NIC with no DHCP; use NAT (the default). A running VM can be switched live
   with `VBoxManage controlvm Win11 nic1 nat`.

@@ -56,14 +56,14 @@ log_error(){ echo -e "${RED}[ERROR]${NC} $*"; }
 
 # Brief usage for argument errors (full docs are in --help).
 usage() {
-  echo "Usage: ./setup_vm.sh --iso /path/to/Win11.iso --unattended [options]"
-  echo "Run './setup_vm.sh --help' for the full description, all options, and examples."
+  echo "Usage: ./build-vm.sh --iso /path/to/Win11.iso --unattended [options]"
+  echo "Run './build-vm.sh --help' for the full description, all options, and examples."
   exit 1
 }
 
 print_help() {
 cat <<'EOF'
-setup_vm.sh - build a Windows 11 VirtualBox developer VM (TimeClock Plus toolchain), unattended.
+build-vm.sh - build a Windows 11 VirtualBox developer VM (TimeClock Plus toolchain), unattended.
 
 WHAT IT DOES
   A complete, hands-free end-to-end build. With just your GitHub credentials it: pulls the
@@ -82,10 +82,10 @@ WHAT IT DOES
   already exists it RESUMES the (idempotent) in-guest install instead of recreating it.
 
   NOTE: screen recording is intentionally NOT built in - VirtualBox's recorder
-  destabilized the guest. For a live progress view + a timelapse video, use run_clean.sh.
+  destabilized the guest. For a live progress view + a timelapse video, add --watch.
 
 USAGE
-  GH_TOKEN=... GH_USER=... ./setup_vm.sh --unattended -y      # ISO + cfg auto-pulled
+  GH_TOKEN=... GH_USER=... ./build-vm.sh --unattended -y      # ISO + cfg auto-pulled
 
 REQUIRED CREDENTIALS (real run; not needed for --dry-run)
   --gh-token TOKEN       GitHub token for the private-repo clone + GitHub NuGet source
@@ -113,14 +113,21 @@ OPTIONS
   --aws-access-key KEY   AWS access key id  -> guest env var. OPTIONAL: the WebEdition build
   --aws-secret-key SECRET   and local run do NOT need AWS; these are only for runtime AWS
                          features (S3/SES). (or set $AWS_ACCESS_KEY_ID / $AWS_SECRET_ACCESS_KEY)
-  --export FILE.ova      After '8/8 Setup complete', power off and export a portable OVA
+  --watch                Follow the in-guest install live ([guest]/[log]) and build an
+                         annotated screenshot timelapse under .videos/ (needs no extra tools;
+                         ffmpeg is auto-resolved without sudo)
+  --export DIR           Wait until EVERYTHING is done (repos cloned, server compiled, all 4
+                         servers listening), then power off and export a portable OVA into DIR.
+                         Refuses to export a half-built VM.
+  --export-only DIR      Skip the build; export the VM already in the running container now
+                         (no readiness wait - you're asserting it's ready)
   --dry-run              Stage a marker so the in-guest tool install runs DUMMY steps (each
                          sleeps ~3s) - verifies the whole flow in minutes, no credentials
                          needed. (Formerly --test.)
   --headless             Start the VM headless (auto-selected when no X DISPLAY is present)
   --host-iocache on|off  Force VirtualBox host I/O cache (default: auto - on for
                          overlay/union/ZFS filesystems that can't do O_DIRECT)
-  --log-file PATH        Tee a full transcript of the run here (default: ./setup_vm-<ts>.log)
+  --log-file PATH        Tee a full transcript of the run here (default: ./build-vm-<ts>.log)
   --base-folder PATH     Parent directory for the VM
   --skip-install         Don't create a VM; just ensure VirtualBox is installed
   -y, --yes              Assume yes; don't prompt for confirmation
@@ -134,21 +141,22 @@ EXAMPLES
   # Complete hands-free build (ISO + cfg auto-pulled; clone + build + post-build by default).
   # Credentials come from the environment - the minimal-interaction default:
   export GH_TOKEN=ghp_xxx GH_USER=myuser
-  ./setup_vm.sh --unattended -y
+  ./build-vm.sh --unattended -y
 
-  # Same, plus export a portable OVA appliance at the end:
-  ./setup_vm.sh --unattended --export /mnt/docker.data/win11-ova/win11.ova -y
+  # Live progress + an annotated timelapse video:
+  ./build-vm.sh --unattended --watch -y
+
+  # Build, then export a portable OVA appliance into a host folder:
+  ./build-vm.sh --unattended --watch --export /mnt/docker.data/win11-ova -y
 
   # Fast end-to-end DRY RUN (dummy installs, ~minutes; no credentials needed):
-  ./setup_vm.sh --unattended --dry-run -y
+  ./build-vm.sh --unattended --dry-run --watch -y
 
   # Resume a half-finished build (just re-run with the same --vm-name):
-  ./setup_vm.sh --unattended -y
+  ./build-vm.sh --unattended -y
 
-  # Full pipeline with LIVE logs + an annotated timelapse video (wrapper around this script):
-  ./run_clean.sh                                  # real build + video
-  ./run_clean.sh --dry-run                        # fast validation
-  ./run_clean.sh --export /mnt/docker.data/win11-ova
+  # Export only - the VM is already built in the running container, no rebuild:
+  ./build-vm.sh --export-only /mnt/docker.data/win11-ova
 EOF
 }
 
@@ -440,10 +448,15 @@ run_host_orchestrator() {
   # Re-pass all original args but point --iso at the in-container mount path.
   local repo_dir iso_dir iso_base; repo_dir=$(cd "$(dirname "$0")" && pwd)
   iso_dir=$(dirname "$HOST_ISO_PATH"); iso_base=$(basename "$HOST_ISO_PATH")
+  # Strip host-only flags: --iso/--cfg (the orchestrator places those itself) and the
+  # watch/export flags (handled host-side after the build, never inside the container).
   local inner_args=(); prev=""
   for a in "$@"; do
-    if [[ "$prev" == "--iso" || "$prev" == "--cfg" ]]; then prev=""; continue; fi  # drop value
-    if [[ "$a" == "--iso" || "$a" == "--cfg" ]]; then prev="$a"; continue; fi        # drop flag (handled above)
+    if [[ "$prev" == "--iso" || "$prev" == "--cfg" || "$prev" == "--export" || "$prev" == "--export-only" ]]; then prev=""; continue; fi
+    case "$a" in
+      --iso|--cfg|--export|--export-only) prev="$a"; continue ;;   # flag + its value dropped
+      --watch) continue ;;                                          # boolean flag dropped
+    esac
     inner_args+=("$a"); prev=""
   done
   inner_args+=(--iso "/iso/$iso_base")
@@ -469,17 +482,163 @@ run_host_orchestrator() {
   docker exec -e VMBUILDER_INNER=1 -e LOGNAME=root -e USER=root \
     -e GH_TOKEN="${GH_TOKEN:-}" -e GH_USER="${GH_USER:-}" \
     -e AWS_ACCESS_KEY_ID="${AWS_ACCESS_KEY:-}" -e AWS_SECRET_ACCESS_KEY="${AWS_SECRET_KEY:-}" \
-    "$cname" bash -lc "cd /work/win11vbox && ./setup_vm.sh $(printf '%q ' "${inner_args[@]}")"
+    "$cname" bash -lc "cd /work/win11vbox && ./build-vm.sh $(printf '%q ' "${inner_args[@]}")"
 }
 
 # --help / -h must be instant and side-effect-free: handle it BEFORE any host
 # orchestration (no docker pull, no container start).
 for _a in "$@"; do case "$_a" in -h|--help) print_help; exit 0 ;; esac; done
 
+# ===================== Host-side extras (only used by the orchestrator) =====================
+# --watch       : follow the in-guest install live and build an annotated screenshot timelapse
+# --export DIR  : after the build, export a portable OVA to host DIR
+# --export-only DIR : skip the build; just export the VM already in the running container
+HC="vmbuilder_run"
+HVM="$VM_NAME"
+HREPO="$(cd "$(dirname "$0")" && pwd)"
+HVID="$HREPO/.videos"
+HFONT="$(find /usr/share/fonts -name 'DejaVuSans.ttf' 2>/dev/null | head -1)"
+WATCH=false; EXPORT_DIR=""; EXPORT_ONLY=""; _pv=""
+for _a in "$@"; do
+  case "$_pv" in
+    --export)      EXPORT_DIR="$_a" ;;
+    --export-only) EXPORT_DIR="$_a"; EXPORT_ONLY=1 ;;
+  esac
+  [[ "$_a" == "--watch" ]] && WATCH=true
+  _pv="$_a"
+done
+
+# VBoxManage inside the container (HOME=/root is where the VM is registered; full path because
+# a non-login exec has no PATH).
+gx(){ docker exec -e HOME=/root "$HC" /usr/bin/VBoxManage "$@"; }
+gst(){ gx guestcontrol "$HVM" --username dev --password dev run --exe 'C:\Windows\System32\cmd.exe' -- cmd.exe /c 'type D:\Tools\install_status.txt' 2>/dev/null | tr -d '\r' | grep -v WARNING | tail -1; }
+glg(){ gx guestcontrol "$HVM" --username dev --password dev run --exe 'C:\Windows\System32\cmd.exe' -- cmd.exe /c 'type D:\Tools\install_tools.log' 2>/dev/null | tr -d '\r' | grep -v '^WARNING:'; }
+
+ensure_ffmpeg(){
+  FFMPEG="$(command -v ffmpeg || true)"
+  [[ -z "$FFMPEG" && -x "$HOME/.local/bin/ffmpeg" ]] && FFMPEG="$HOME/.local/bin/ffmpeg"
+  if [[ -z "$FFMPEG" ]]; then
+    log_info "Fetching a static ffmpeg to ~/.local/bin (no sudo)..."
+    mkdir -p "$HOME/.local/bin"
+    if curl -fsSL https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-amd64-static.tar.xz -o /tmp/ff_bv.tar.xz 2>/dev/null \
+       && tar -xJf /tmp/ff_bv.tar.xz -C /tmp 2>/dev/null \
+       && cp /tmp/ffmpeg-*-amd64-static/ffmpeg "$HOME/.local/bin/ffmpeg" 2>/dev/null; then
+      chmod +x "$HOME/.local/bin/ffmpeg"; FFMPEG="$HOME/.local/bin/ffmpeg"
+    fi
+  fi
+  [[ -n "$FFMPEG" ]] && log_info "ffmpeg: $FFMPEG" || log_warn "ffmpeg unavailable - frames will be saved, but no video assembled."
+}
+
+# Power off the existing VM, export it to an OVA, and stream-copy it to host $EXPORT_DIR
+# (the container can't see that path, so export to the overlay and copy via a helper).
+do_export(){
+  local ts OVA OVERLAY
+  ts="$(date +%Y%m%d-%H%M%S)"; OVA="Win11-WebEdition-${ts}.ova"; OVERLAY="/root/$OVA"
+  log_info "Exporting OVA to host:$EXPORT_DIR (powers the VM off; servers restart on the next boot)"
+  gx controlvm "$HVM" acpipowerbutton >/dev/null 2>&1 || true
+  for _ in $(seq 1 40); do [[ "$(gx showvminfo "$HVM" --machinereadable 2>/dev/null | sed -n 's/^VMState=//p' | tr -d '"')" == poweroff ]] && break; sleep 6; done
+  gx controlvm "$HVM" poweroff >/dev/null 2>&1 || true; sleep 6
+  log_info "Exporting (large; a few minutes)..."
+  gx export "$HVM" -o "$OVERLAY" --vsys 0 --product "TCP Win11 Dev VM ($ts)" || { log_error "export failed"; return 1; }
+  docker rm -f ova_dest >/dev/null 2>&1 || true
+  docker run -d --name ova_dest -v "$EXPORT_DIR":/out "$VMBUILDER_IMAGE" sleep infinity >/dev/null
+  log_info "Copying OVA to $EXPORT_DIR ..."
+  docker cp "$HC:$OVERLAY" - | docker cp - ova_dest:/out
+  docker exec ova_dest sh -lc "chmod 644 /out/'$OVA'; ls -lh /out/'$OVA'"
+  docker exec "$HC" rm -f "$OVERLAY" 2>/dev/null || true
+  docker rm -f ova_dest >/dev/null 2>&1 || true
+  log_success "OVA: $EXPORT_DIR/$OVA"
+}
+
+# Block until the in-guest build is FULLY done before exporting: repos cloned, the server
+# compiled, and all four WebEdition servers actually LISTENING. Returns non-zero on a clone
+# failure, a dead container, or a timeout - so --export never produces a half-built OVA.
+# (This is "everything is finally done": 8/8 alone is just the toolchain, written before the
+# clone/compile/server-start even run.)
+wait_for_ready(){
+  log_info "Waiting for the build to fully finish before export: clone -> compile -> all 4 servers listening."
+  log_info "(This runs well past 8/8 - it can take 1-2h more for the clone, server build, and startup.)"
+  local i cs ns clone_ok=false p ready
+  for i in $(seq 1 240); do
+    docker inspect -f '{{.State.Running}}' "$HC" 2>/dev/null | grep -q true || { log_error "container '$HC' stopped while waiting - not exporting."; return 1; }
+    if [[ "$clone_ok" != true ]]; then
+      cs="$(gx guestcontrol "$HVM" --username dev --password dev run --exe 'C:\Windows\System32\cmd.exe' -- cmd.exe /c 'type D:\Work\clone_status.txt' 2>/dev/null | tr -d '\r' | grep -v WARNING)"
+      case "$cs" in
+        *CLONE-OK*)     clone_ok=true; log_info "repos cloned + verified." ;;
+        *CLONE-FAILED*) log_error "in-guest clone FAILED - not exporting (fix the token/network, re-run)."; return 1 ;;
+      esac
+    fi
+    ns="$(gx guestcontrol "$HVM" --username dev --password dev run --exe 'C:\Windows\System32\cmd.exe' -- cmd.exe /c 'netstat -ano -p tcp' 2>/dev/null | tr -d '\r')"
+    ready=true
+    for p in 8008 8010 8012 8014; do printf '%s\n' "$ns" | grep -E ":$p\b" | grep -q LISTENING || ready=false; done
+    if [[ "$ready" == true ]]; then log_success "all four servers are listening (8008/8010/8012/8014) - build complete."; return 0; fi
+    [[ $((i % 5)) -eq 0 ]] && log_info "still building... (clone_ok=$clone_ok, ~${i} min elapsed)"
+    sleep 60
+  done
+  log_error "timed out (~4h) waiting for the servers to come up - not exporting; VM left running for inspection."
+  return 1
+}
+
+# Follow the in-guest install (streaming [guest]/[log]), capture a screenshot every 30s, then
+# annotate each frame with its real step and assemble a timelapse mp4. Non-intrusive: built-in
+# VBox recording is never used (it destabilized the guest).
+watch_capture(){
+  local FRAMES="$HVID/frames" ts MAN OUT n=0 last="" idle=0 loglines=0 full total st rel f s safe
+  ts="$(date +%Y%m%d-%H%M%S)"; MAN="$HVID/.frames-${ts}.manifest"; OUT="$HVID/${ts}-timelapse.mp4"
+  mkdir -p "$FRAMES"; : > "$MAN"
+  docker inspect "$HC" >/dev/null 2>&1 || { log_warn "no '$HC' container to watch."; return 0; }
+  log_info "Following the in-guest install + capturing frames (live [guest]/[log] below)..."
+  while true; do
+    st="$(gst)"
+    full="$(glg)"
+    if [[ -n "$full" ]]; then total=$(printf '%s\n' "$full" | wc -l | tr -d ' '); else total=0; fi
+    if [[ "$total" -gt "$loglines" ]]; then printf '%s\n' "$full" | sed -n "$((loglines+1)),${total}p" | sed 's/^/[log] /'; loglines=$total; fi
+    rel="frames/$(printf 'frame-%05d.png' "$n")"
+    if gx controlvm "$HVM" screenshotpng "/work/win11vbox/.videos/$rel" >/dev/null 2>&1 && [[ -s "$FRAMES/$(printf 'frame-%05d.png' "$n")" ]]; then
+      echo "$(printf 'frame-%05d.png' "$n")|${st:-(starting)}" >> "$MAN"; n=$((n+1))
+    fi
+    [[ -n "$st" && "$st" != "$last" ]] && { echo "[guest] $(date +%H:%M:%S) $st"; last="$st"; }
+    case "$st" in *"Setup complete"*) echo "[guest] reached 8/8"; break ;; *ERROR*) echo "[guest] installer reported ERROR - stopping capture"; break ;; esac
+    docker inspect -f '{{.State.Running}}' "$HC" 2>/dev/null | grep -q true || { echo "[guest] container stopped"; break; }
+    idle=$((idle+1)); [[ $idle -ge 360 ]] && { echo "[guest] 3h cap reached"; break; }
+    sleep 30
+  done
+  # Frames are written by the container as root; chown via the container (no host sudo prompt).
+  docker exec "$HC" chown -R "$(id -u):$(id -g)" /work/win11vbox/.videos/frames 2>/dev/null \
+    || sudo -n chown -R "$(id -u):$(id -g)" "$FRAMES" 2>/dev/null || true
+  if [[ -z "${FFMPEG:-}" ]]; then log_warn "ffmpeg unavailable - $n frames saved in $FRAMES, no video."; return 0; fi
+  while IFS='|' read -r f s; do
+    [[ -s "$FRAMES/$f" ]] || continue
+    safe="$(printf '%s' "$s" | tr -cd '[:alnum:] /._-' | cut -c1-70)"
+    "$FFMPEG" -y -loglevel error -i "$FRAMES/$f" -vf "drawtext=fontfile=${HFONT}:text='${safe}':x=10:y=h-34:fontsize=20:fontcolor=yellow:box=1:boxcolor=black@0.7" "$FRAMES/$f.a.png" 2>/dev/null || cp "$FRAMES/$f" "$FRAMES/$f.a.png"
+    mv "$FRAMES/$f.a.png" "$FRAMES/$f"
+  done < "$MAN"
+  "$FFMPEG" -y -loglevel error -framerate 10 -pattern_type glob -i "$FRAMES/frame-*.png" -vf "scale=trunc(iw/2)*2:trunc(ih/2)*2,format=yuv420p" "$OUT"
+  log_success "timelapse: $OUT ($n frames)"
+}
+
 # Run host-side orchestration unless we are already inside the container.
 if [[ -z "${VMBUILDER_INNER:-}" ]]; then
-  run_host_orchestrator "$@"
-  exit $?
+  mkdir -p "$HVID"
+  HLOG="$HVID/build-vm-$(date +%Y%m%d-%H%M%S).log"
+  exec > >(tee -a "$HLOG") 2>&1
+  log_info "Host transcript: $HLOG"
+
+  if [[ -n "$EXPORT_ONLY" ]]; then
+    docker inspect "$HC" >/dev/null 2>&1 || { log_error "container '$HC' not found - nothing to export."; exit 1; }
+    gx showvminfo "$HVM" >/dev/null 2>&1 || { log_error "VM '$HVM' not registered in '$HC'."; exit 1; }
+    do_export; exit $?
+  fi
+
+  [[ "$WATCH" == true ]] && ensure_ffmpeg
+  run_host_orchestrator "$@" || exit $?
+  [[ "$WATCH" == true ]] && watch_capture
+  if [[ -n "$EXPORT_DIR" ]]; then
+    # Only export once everything is truly done (clone + compile + servers listening).
+    wait_for_ready || { log_error "Build did not reach 'all servers running' - NOT exporting."; exit 1; }
+    do_export
+  fi
+  exit 0
 fi
 
 while [[ $# -gt 0 ]]; do
@@ -520,9 +679,9 @@ done
 # e.g. a root-owned bind mount) so a transcript is always produced.
 LOG_TS=$(date +%Y%m%d-%H%M%S)
 if [[ -n "$LOG_FILE" ]]; then
-  LOG_CANDIDATES=("$LOG_FILE" "${HOME}/setup_vm-${LOG_TS}.log" "/tmp/setup_vm-${LOG_TS}.log")
+  LOG_CANDIDATES=("$LOG_FILE" "${HOME}/build-vm-${LOG_TS}.log" "/tmp/build-vm-${LOG_TS}.log")
 else
-  LOG_CANDIDATES=("$(pwd)/setup_vm-${LOG_TS}.log" "${HOME}/setup_vm-${LOG_TS}.log" "/tmp/setup_vm-${LOG_TS}.log")
+  LOG_CANDIDATES=("$(pwd)/build-vm-${LOG_TS}.log" "${HOME}/build-vm-${LOG_TS}.log" "/tmp/build-vm-${LOG_TS}.log")
 fi
 LOG_FILE=""
 for _cand in "${LOG_CANDIDATES[@]}"; do
@@ -898,53 +1057,94 @@ chmod +x "${VM_DIR}/build_client.sh"
 # selector starts exactly those two.
 cat > "${VM_DIR}/start_servers.sh" <<'EOF'
 #!/bin/bash
-# Start WebEdition runtime servers. Usage:
-#   start_servers.sh [app|adm|terminal|workstation|linclock|all]   (default: all)
+# Start WebEdition runtime servers by DELEGATING to the repo's own canonical launchers in
+# server/Etc/Util (start-tcp{app,adm,hub,pwh}-server.sh). Those scripts know each server's
+# framework and run the built Tcp.<Name>.exe from bin\Debug, provisioning cfg as needed.
+#   Usage: start_servers.sh [app|adm|terminal|workstation|linclock|all]   (default: all)
 #     linclock = AppServerApi + TerminalHubApi (what a clock device needs)
+# IMPORTANT: only AppServerApi targets net10.0; AdmServerApi/TerminalHubApi/WorkstationHubApi
+# are .NET Framework 4.7.2 (OutputType=Exe). They are built by 'nant build' (VS MSBuild) -
+# NOT 'dotnet build' (which can't resolve System.Web.Http for the v4.7.2 projects). So this
+# script does NOT build; build with build_server.sh / post_build first.
 set -uo pipefail
-# Ensure dotnet is found even when launched from a non-interactive boot task.
+WE=/cygdrive/d/Work/tcp-we-71
+UTIL="$WE/server/Etc/Util"
+[[ -d "$UTIL" ]] || { echo "ERROR: $UTIL not found - clone + build the server first." >&2; exit 1; }
 export PATH="$PATH:/cygdrive/c/Program Files/dotnet"
-IFACE=/cygdrive/d/Work/tcp-we-71/server/Src/Interface
-[[ -d "$IFACE" ]] || { echo "ERROR: $IFACE not found - clone + build the server first." >&2; exit 1; }
-[[ -d "$IFACE/cfg" ]] || { echo "ERROR: $IFACE/cfg missing - apply cfg.zip (server config) first." >&2; exit 1; }
-LOGDIR=/cygdrive/d/Tools/serverlogs; mkdir -p "$LOGDIR"
-cd "$IFACE"
-
-start_one() {  # <name>
-  local n="$1"
-  if [[ ! -f "$n/$n.csproj" ]]; then echo "  skip $n (no $n/$n.csproj)"; return; fi
-  echo "  starting $n  (log: $LOGDIR/$n.log)"
-  ( dotnet run --project "$n/$n.csproj" cfg ) >"$LOGDIR/$n.log" 2>&1 &
-  echo "    pid $!"
-}
+# AppServerApi (net10.0) lands in bin/Debug/<framework>; its launcher reads this.
+export APP_FRAMEWORK_VERSION="${APP_FRAMEWORK_VERSION:-net10.0}"
 
 sel="${1:-all}"
-declare -a SVRS
+declare -a SCRIPTS
 case "$sel" in
-  app)          SVRS=(AppServerApi) ;;
-  adm|admin)    SVRS=(AdmServerApi) ;;
-  terminal)     SVRS=(TerminalHubApi) ;;
-  workstation)  SVRS=(WorkstationHubApi) ;;
-  linclock)     SVRS=(AppServerApi TerminalHubApi) ;;
-  all)          SVRS=(AppServerApi AdmServerApi TerminalHubApi WorkstationHubApi) ;;
+  app)          SCRIPTS=(start-tcpapp-server.sh) ;;
+  adm|admin)    SCRIPTS=(start-tcpadm-server.sh) ;;
+  terminal)     SCRIPTS=(start-tcphub-server.sh) ;;
+  workstation)  SCRIPTS=(start-tcppwh-server.sh) ;;
+  linclock)     SCRIPTS=(start-tcpapp-server.sh start-tcphub-server.sh) ;;
+  all)          SCRIPTS=(start-tcpapp-server.sh start-tcpadm-server.sh start-tcphub-server.sh start-tcppwh-server.sh) ;;
   *) echo "usage: start_servers.sh [app|adm|terminal|workstation|linclock|all]"; exit 1 ;;
 esac
 
-echo "Starting: ${SVRS[*]}"
-for s in "${SVRS[@]}"; do start_one "$s"; done
+echo "Starting via repo launchers: ${SCRIPTS[*]}"
+for s in "${SCRIPTS[@]}"; do
+  if [[ -f "$UTIL/$s" ]]; then
+    echo ">>> $s"
+    ( cd "$UTIL" && bash "./$s" ) || echo "  (launcher $s reported a problem - check the server's bin/Debug .out/.err)"
+  else
+    echo "  skip $s (not found - server may not be built yet)"
+  fi
+done
 cat <<MSG
 
-Servers launching in the background. Tail logs in $LOGDIR (e.g. tail -f $LOGDIR/TerminalHubApi.log).
 Endpoints (raw ports per cfg; nginx fronts the web UIs over HTTPS):
-  AppServerApi       -> employee/manager/webclock backend; web UI http://localhost:8081/app/manager
-  AdmServerApi       -> admin; web UI http://localhost:8018/app/admin
-  TerminalHubApi     -> clock-device hub  <-- linclock/winclock/RDTg/POS connect here
-  WorkstationHubApi  -> workstation-attached terminals/biometric readers
-For a linclock: run 'start_servers.sh linclock' (App + TerminalHub) with SQL Server running,
-then point the device's NetworkSettings serverUrl at this VM's IP.
+  AppServerApi(8008)  manager UI http://localhost:8081/app/manager
+  AdmServerApi(8012)  admin UI   http://localhost:8018/app/admin
+  TerminalHubApi(8010)  clock-device hub  <-- linclock/winclock/RDTg/POS connect here
+  WorkstationHubApi(8014)  workstation-attached terminals/biometric readers
+Per-server output is in each bin/Debug as Tcp.<Name>.out / .err. If a server didn't start,
+make sure it was built by 'nant build' (build_server.sh / post_build), not 'dotnet build'.
+For a linclock: 'start_servers.sh linclock' with SQL Server running; point the device's
+NetworkSettings serverUrl at this VM's IP.
 MSG
 EOF
 chmod +x "${VM_DIR}/start_servers.sh"
+
+# Version switcher: pick a release/7.x branch of tcp-we-71, then rebuild server + client and
+# restore the test DB for that version (the guide's select_we.sh). Run from Cygwin.
+cat > "${VM_DIR}/select_we.sh" <<'EOF'
+#!/bin/bash
+# Switch the tcp-we-71 working copy to another release branch and rebuild for it.
+# Usage: select_we.sh [branch]   (no arg -> interactive menu of release/7.x branches)
+set -uo pipefail
+WE=/cygdrive/d/Work/tcp-we-71
+[[ -d "$WE/.git" ]] || { echo "ERROR: $WE is not a clone - run the build first." >&2; exit 1; }
+cd "$WE"
+git fetch --all --prune
+
+branch="${1:-}"
+if [[ -z "$branch" ]]; then
+  # Offer release/7.x branches >= 7.1.56, plus develop.
+  mapfile -t branches < <(git branch -r 2>/dev/null | sed 's#^[ *]*origin/##' \
+    | grep -E '^release/7\.' | sort -uV)
+  branches+=("develop")
+  echo "Select a branch:"
+  i=0; for b in "${branches[@]}"; do echo "  [$i] $b"; i=$((i+1)); done
+  read -rp "Index: " sel
+  [[ "$sel" =~ ^[0-9]+$ && "$sel" -lt "${#branches[@]}" ]] || { echo "Invalid selection." >&2; exit 1; }
+  branch="${branches[$sel]}"
+fi
+
+echo ">>> Checking out $branch"
+git checkout "$branch" || { echo "ERROR: checkout failed." >&2; exit 1; }
+git pull --ff-only 2>/dev/null || true
+
+echo ">>> Rebuilding server"; /cygdrive/c/Setup/build_server.sh || { echo "server build failed" >&2; exit 1; }
+echo ">>> Rebuilding client"; /cygdrive/c/Setup/build_client.sh || { echo "client build failed" >&2; exit 1; }
+echo ">>> Restoring test DB"; ( cd "$WE/server" && nant __restore-db-prod-test ) || echo "WARN: DB restore failed (check cfg)."
+echo ">>> Done. Restart the servers: C:\\Setup\\start_servers.sh all"
+EOF
+chmod +x "${VM_DIR}/select_we.sh"
 
 cat > "${VM_DIR}/post_install_setup.sh" <<'EOF'
 #!/bin/bash
@@ -1105,9 +1305,17 @@ rem company-connection-map.xml). Extraction uses PowerShell; the text edits use 
 if exist "%HERE%cfg.zip" (
   echo post_build: applying cfg.zip server config... >> "%LOG%"
   if not exist "!IFACE!" md "!IFACE!"
+  rem cfg.zip already contains a top-level cfg\ folder (TCPCONN.XML, *.config, etc.), so it
+  rem lands at ...\Interface\cfg\. This zip ships TCPCONN.XML directly (there is no
+  rem TCPCONN.PROD.XML), so we just make sure Integrated is true in the shipped file - we do
+  rem NOT rename PROD->XML (that assumption left TCPCONN.XML missing before).
   powershell -NoProfile -ExecutionPolicy Bypass -Command "Expand-Archive -Path 'C:\Setup\cfg.zip' -DestinationPath '!IFACE!' -Force" >> "%LOG%" 2>&1
-  "!BASH!" -lc "cd /cygdrive/d/Work/tcp-we-71/server/Src/Interface/cfg && { [ -f TCPCONN.XML ] && mv -f TCPCONN.XML TCPCONN.XML.ORIG; cp -f TCPCONN.PROD.XML TCPCONN.XML; sed -i 's_Integrated>false</Integrated_Integrated>true</Integrated_g' TCPCONN.XML; [ -f company-connection-map.xml ] && { cp -f company-connection-map.xml company-connection-map.xml.orig; sed -i '4d' company-connection-map.xml; }; }" >> "%LOG%" 2>&1
+  "!BASH!" -lc "cd /cygdrive/d/Work/tcp-we-71/server/Src/Interface/cfg && { [ -f TCPCONN.XML ] || { [ -f TCPCONN.PROD.XML ] && cp -f TCPCONN.PROD.XML TCPCONN.XML; }; [ -f TCPCONN.XML ] && sed -i 's_Integrated>false</Integrated_Integrated>true</Integrated_g' TCPCONN.XML; echo cfg applied:; ls -1; }" >> "%LOG%" 2>&1
 ) else ( echo post_build: no cfg.zip staged - skipping server config ^(DB restore/run may fail^) >> "%LOG%" )
+
+rem Exclude the work tree from Defender real-time scanning: it was locking build outputs
+rem (e.g. Tcp.Update.dll) and causing intermittent CS2012 "file in use" build failures.
+powershell -NoProfile -ExecutionPolicy Bypass -Command "Add-MpPreference -ExclusionPath 'D:\Work' -ErrorAction SilentlyContinue" >> "%LOG%" 2>&1
 
 echo post_build: building server... >> "%LOG%"
 "!BASH!" -lc "/cygdrive/c/Setup/build_server.sh" >> "%LOG%" 2>&1
@@ -1423,7 +1631,7 @@ Windows, the `dev` account, Guest Additions, and the dev toolchain install autom
 
 ## What Runs Automatically When Credentials Are Supplied
 
-If `setup_vm.sh` was given `--gh-token` (and optionally `--gh-user`, `--aws-access-key`,
+If `build-vm.sh` was given `--gh-token` (and optionally `--gh-user`, `--aws-access-key`,
 `--aws-secret-key`), these previously-manual steps already ran hands-free during setup:
 
 - **Repo clone** - all `tcp-software` repos cloned to `D:\Work` over HTTPS and verified (`clone_repos.cmd`)
@@ -1586,6 +1794,24 @@ call :setstep "6/8 Installing SQL Server Management Studio" || goto :cancelled
 call :netwait
 if defined TESTMODE ( call :dummy ssms ) else ( call choco install -y sql-server-management-studio >> "%LOG%" 2>&1 )
 
+rem OpenSSH server (before Visual Studio): install the Windows OpenSSH.Server capability,
+rem set sshd (and ssh-agent) to start automatically AT EVERY BOOT, ENABLE PASSWORD LOGINS in
+rem sshd_config, open inbound TCP 22, and (re)start the service so it's live now.
+echo ==== installing OpenSSH server %DATE% %TIME% ==== >> "%LOG%"
+if defined TESTMODE ( call :dummy opensshserver ) else (
+  powershell -NoProfile -ExecutionPolicy Bypass -Command "Add-WindowsCapability -Online -Name OpenSSH.Server~~~~0.0.1.0" >> "%LOG%" 2>&1
+  rem Auto-start at every boot. (sc config also belt-and-suspenders in case the service exists.)
+  powershell -NoProfile -ExecutionPolicy Bypass -Command "Set-Service -Name sshd -StartupType Automatic -ErrorAction SilentlyContinue; Set-Service -Name ssh-agent -StartupType Automatic -ErrorAction SilentlyContinue; Start-Service sshd" >> "%LOG%" 2>&1
+  sc config sshd start= auto >> "%LOG%" 2>&1
+  rem Open inbound TCP 22.
+  powershell -NoProfile -ExecutionPolicy Bypass -Command "if (-not (Get-NetFirewallRule -Name sshd -ErrorAction SilentlyContinue)) { New-NetFirewallRule -Name sshd -DisplayName 'OpenSSH Server (sshd)' -Enabled True -Direction Inbound -Protocol TCP -Action Allow -LocalPort 22 }" >> "%LOG%" 2>&1
+  rem Enable password authentication: starting sshd once creates the default sshd_config, then
+  rem force 'PasswordAuthentication yes' (replace any existing/commented line, else append) and
+  rem restart so it takes effect. PubkeyAuthentication stays on too.
+  powershell -NoProfile -ExecutionPolicy Bypass -Command "$f='C:\ProgramData\ssh\sshd_config'; if (Test-Path $f) { $c = Get-Content $f; $c = $c -replace '^\s*#?\s*PasswordAuthentication\s+.*','PasswordAuthentication yes'; if (($c -join \"`n\") -notmatch '(?m)^PasswordAuthentication yes') { $c += 'PasswordAuthentication yes' }; Set-Content -Path $f -Value $c -Encoding ascii }" >> "%LOG%" 2>&1
+  powershell -NoProfile -ExecutionPolicy Bypass -Command "Restart-Service sshd -ErrorAction SilentlyContinue" >> "%LOG%" 2>&1
+)
+
 call :setstep "7/8 Installing Visual Studio 2026 - largest step, please keep waiting" || goto :cancelled
 if defined TESTMODE ( call :dummy visualstudio2026 & goto :vsdone )
 rem VS refuses a shared-folder payload cache ("not a fixed drive" -> setup.exe exits 1
@@ -1697,20 +1923,15 @@ EOF
   # Interactive progress window. install_tools runs in a non-interactive task
   # session, so its own windows aren't visible; this runs in the user's desktop
   # session (launched via RunOnce by firstlogon) and reflects install_status.txt.
-  cat > "${VM_DIR}/show_progress.ps1" <<'EOF'
+cat > "${VM_DIR}/show_progress.ps1" <<'EOF'
 # Single-instance guard so only one progress window ever shows. Treat an
 # abandoned mutex (a previous instance exited without releasing) as acquirable
 # rather than letting WaitOne throw and crash this instance.
 $mutex = New-Object System.Threading.Mutex($false, 'TCPSetupProgressWindow')
 try { $acquired = $mutex.WaitOne(0) } catch [System.Threading.AbandonedMutexException] { $acquired = $true }
 if (-not $acquired) { exit }
-# Run this process at HIGH CPU priority so its WinForms UI thread keeps getting scheduled -
-# and the window keeps repainting - even while the SQL/VS installs saturate all vCPUs.
-# Without this, Windows starves the message pump, marks the window "Not Responding", and
-# freezes its last frame (we saw it stuck on "Installing SQL Server" for the whole run).
-# The loop is mostly idle (a 1.5s timer doing trivial work), so High here is harmless to
-# the installers. Marshalling a background reader to the UI thread wouldn't help - the UI
-# thread itself is the starved resource, which is what raising priority addresses.
+
+# High priority works properly now that the script isn't pinning the execution thread.
 try { [System.Diagnostics.Process]::GetCurrentProcess().PriorityClass = [System.Diagnostics.ProcessPriorityClass]::High } catch {}
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
@@ -1756,6 +1977,7 @@ function Get-LogErrors {
   if ($errs) { return ($errs -join "`r`n") } else { return '(no errors logged)' }
 }
 
+# --- GUI Form Setup ---
 $form = New-Object System.Windows.Forms.Form
 $form.Text = 'TCP Dev Environment Setup'
 $form.Size = New-Object System.Drawing.Size(580,300)
@@ -1785,7 +2007,6 @@ $step.Text = 'Starting background setup...'
 $step.Size = New-Object System.Drawing.Size(540,22); $step.Location = New-Object System.Drawing.Point(16,138)
 $form.Controls.Add($step)
 
-# Details pane (summary + errors), shown at completion/error.
 $details = New-Object System.Windows.Forms.TextBox
 $details.Multiline = $true; $details.ReadOnly = $true; $details.ScrollBars = 'Vertical'
 $details.Font = New-Object System.Drawing.Font('Consolas',9)
@@ -1814,6 +2035,8 @@ $retryBtn.Add_Click({
   $retryBtn.Visible=$false; $closeBtn.Visible=$false; $logBtn.Visible=$false; $details.Visible=$false
   $cancelBtn.Enabled=$true; $cancelBtn.Visible=$true; $step.ForeColor=[System.Drawing.Color]::Black
   $form.Size = New-Object System.Drawing.Size(580,300); $bar.Style='Marquee'; $step.Text='Restarting setup...'
+  # Enable timer polling again for the retry sequence
+  $uiTimer.Start()
   Trigger-Install
 })
 $form.Controls.Add($retryBtn)
@@ -1830,44 +2053,74 @@ function Show-Details($text) {
   $logBtn.Visible = $true; $closeBtn.Visible = $true
 }
 
-$timer = New-Object System.Windows.Forms.Timer
-$timer.Interval = 1500
-$timer.Add_Tick({
- # Whole tick is wrapped so a transient error (e.g. the status file mid-write) can
- # NEVER stop the timer - a stopped timer was why the window froze permanently.
- try {
-  $line = $null
-  if (Test-Path $statusFile) { try { $line = (Get-Content $statusFile -ErrorAction Stop | Select-Object -Last 1) } catch {} }
-  if (-not $line) { $step.Refresh(); $bar.Refresh(); return }
-  if ($line -match '^\s*(\d+)\s*/\s*(\d+)\s+(.*)$') {
-    $n=[int]$matches[1]; $m=[int]$matches[2]; $txt=$matches[3]
-    $bar.Style='Continuous'; if ($m -gt 0) { $bar.Value=[Math]::Max(0,[Math]::Min(100,[int](100*$n/$m))) }
-    $step.ForeColor=[System.Drawing.Color]::Black; $step.Text="Step $n of $m : $txt"
-    if ($n -ge $m) {
-      $timer.Stop(); $bar.Value=100
-      $title.Text='Setup complete'; $msg.Text='Your development environment is ready. Installed components and locations:'
-      $step.Text=$txt; $cancelBtn.Visible=$false; $retryBtn.Visible=$false
-      Show-Details ("INSTALLED:`r`n" + (Get-Summary) + "`r`n`r`nERRORS:`r`n" + (Get-LogErrors) + "`r`n`r`nFull log: $logFile")
+# --- Asynchronous Form UI Timer Integration ---
+$uiTimer = New-Object System.Windows.Forms.Timer
+$uiTimer.Interval = 1500
+$uiTimer.Add_Tick({
+  try {
+    $line = $null
+    if (Test-Path $statusFile) { 
+      try { $line = (Get-Content $statusFile -ErrorAction Stop | Select-Object -Last 1) } catch {} 
     }
-  } elseif ($line -match '^\s*WAIT\s+(.*)$') {
-    $bar.Style='Marquee'; $step.ForeColor=[System.Drawing.Color]::DarkOrange; $step.Text=$matches[1]
-    $cancelBtn.Visible=$true; $retryBtn.Visible=$false
-  } elseif ($line -match '^\s*(ERROR|CANCELLED)\s+(.*)$') {
-    $timer.Stop(); $bar.Style='Continuous'
-    $title.Text=$(if($matches[1] -eq 'ERROR'){'Setup error'}else{'Setup cancelled'})
-    $step.ForeColor=[System.Drawing.Color]::Firebrick; $step.Text=$matches[2]
-    $cancelBtn.Visible=$false; $retryBtn.Visible=$true
-    Show-Details ("STATUS:`r`n  " + $matches[2] + "`r`n`r`nINSTALLED SO FAR:`r`n" + (Get-Summary) + "`r`n`r`nERRORS:`r`n" + (Get-LogErrors) + "`r`n`r`nFull log: $logFile")
-  } else { $step.Text=$line }
-  # Force an immediate synchronous repaint of the live controls so the window keeps
-  # updating even when the guest CPU is saturated and the normal WM_PAINT pump is
-  # starved (Refresh = Invalidate + Update, which paints now instead of waiting for idle).
-  $title.Refresh(); $step.Refresh(); $bar.Refresh()
- } catch { }
+    
+    if (-not $line) { return }
+
+    # Pattern check to see if the engine status yields structural data: "1/5 Installing..."
+    if ($line -match '^\s*(\d+)\s*/\s*(\d+)\s+(.*)$') {
+      $n = [int]$matches[1]; $total = [int]$matches[2]; $txt = $matches[3]
+      $bar.Style = 'Continuous'
+      $bar.Value = [math]::Min(100, [math]::Max(0, [int](($n / $total) * 100)))
+      $step.Text = ("Step {0} of {1}: {2}" -f $n, $total, $txt)
+    } 
+    else {
+      # Handle special keyword results written to the status file
+      switch -regex ($line) {
+        'SUCCESS' {
+          $uiTimer.Stop()
+          $cancelBtn.Visible = $false
+          $bar.Style = 'Continuous'; $bar.Value = 100
+          $step.Text = 'All tools installed successfully.'
+          $step.ForeColor = [System.Drawing.Color]::DarkGreen
+          Show-Details (Get-Summary)
+        }
+        'CANCELLED' {
+          $uiTimer.Stop()
+          $cancelBtn.Visible = $false
+          $bar.Style = 'Continuous'; $bar.Value = 0
+          $step.Text = 'Installation cancelled by user.'
+          $step.ForeColor = [System.Drawing.Color]::DarkRed
+          $retryBtn.Visible = $true
+          Show-Details (Get-LogErrors)
+        }
+        'ERROR' {
+          $uiTimer.Stop()
+          $cancelBtn.Visible = $false
+          $bar.Style = 'Continuous'; $bar.Value = 0
+          $step.Text = 'Installation failed with errors.'
+          $step.ForeColor = [System.Drawing.Color]::DarkRed
+          $retryBtn.Visible = $true
+          Show-Details (Get-LogErrors)
+        }
+        default {
+          # Fallback if text line is present but does not match standard patterns
+          $step.Text = $line
+        }
+      }
+    }
+  } 
+  catch {
+    # Absolute catch fallback so errors never stall out the async rendering engine
+  }
 })
-$timer.Start()
-[void]$form.ShowDialog()
+
+# Launch background execution task immediately
+Trigger-Install
+
+# Fire up asynchronous monitoring ticks and pass window threads over to the Windows Form lifecycle manager
+$uiTimer.Start()
+[System.Windows.Forms.Application]::Run($form)
 EOF
+
 
   # Manual launcher (desktop shortcut points here) to (re)run the install later.
   # Shows the progress window (non-elevated) and runs the installer elevated (UAC).
@@ -1900,7 +2153,7 @@ EOF
   STAGE_DIR=$(mktemp -d)
   for f in bypass_checks.reg post_install_setup.sh setup_env_vars.cmd setup_powershell.ps1 \
            setup_nuget_source.cmd configure_credentials.cmd create_sql_logins.sql run_sql_logins.cmd build_server.sh \
-           build_client.sh start_servers.sh post_build.cmd clone_repos.sh clone_repos.cmd setup_cygwin_ssh.sh setup_nginx.sh firstlogon.cmd \
+           build_client.sh start_servers.sh select_we.sh post_build.cmd clone_repos.sh clone_repos.cmd setup_cygwin_ssh.sh setup_nginx.sh firstlogon.cmd \
            install_cygwin.cmd install_tools.cmd show_progress.ps1 run_setup.cmd setup-x86_64.exe README.md; do
     [[ -f "${VM_DIR}/${f}" ]] && cp "${VM_DIR}/${f}" "$STAGE_DIR/"
   done
@@ -1979,9 +2232,9 @@ EOF
   fi
 
   # NOTE: VirtualBox's built-in screen recording (--recording) is deliberately NOT
-  # used - it intermittently aborts the VM mid-boot. For a timelapse, capture
-  # non-intrusive periodic screenshots from the host instead (see run_clean.sh),
-  # which never touches the running guest.
+  # used - it intermittently aborts the VM mid-boot. For a timelapse, --watch captures
+  # non-intrusive periodic screenshots from the host instead, which never touches the
+  # running guest.
   VBoxManage startvm "$VM_NAME" --type "$START_TYPE"
   log_info "VM started (type: $START_TYPE)."
 
