@@ -1815,23 +1815,12 @@ if defined TESTMODE ( call :dummy chocolatey ) else (
 )
 
 rem --- Start the repo clone EARLY, in the BACKGROUND, so it overlaps the long SQL Server and
-rem Visual Studio installs below. The clone only needs Git (not SQL/VS), so install Git now -
-rem it doesn't pend a reboot, so it's safe before SQL - then kick off clone_bg.cmd with
-rem 'start /b'. By the time VS finishes, the repos are already cloned + verified; the finalize
-rem step near the end just confirms that (and retries synchronously if the background clone
-rem failed or never ran). Git is reinstalled idempotently in step 4 as a fallback. Skipped in
-rem TESTMODE and when no gh_token is staged.
-if not defined TESTMODE if exist "%~dp0gh_token.txt" if exist "%~dp0clone_bg.cmd" (
-  call :netwait
-  echo ==== installing Git early for the background clone %DATE% %TIME% ==== >> "%LOG%"
-  call choco install -y git >> "%LOG%" 2>&1
-  set "PATH=!PATH!;C:\Program Files\Git\cmd"
-  if not exist D:\Work md D:\Work
-  del "D:\Work\clone_bg.ok" "D:\Work\clone_bg.failed" >nul 2>&1
-  echo running> "D:\Work\clone_bg.running"
-  echo ==== launching background repo clone %DATE% %TIME% ==== >> "%LOG%"
-  start "" /b "%~dp0clone_bg.cmd"
-)
+rem Visual Studio installs below. Done in a SUBROUTINE (:start_bg_clone) called by a single
+rem line - an inline parenthesized block here disrupts cmd's parsing of the sequential install
+rem steps that follow (it caused steps 2-8 to be skipped). The subroutine installs Git (needed
+rem for the clone; doesn't pend a reboot, so safe before SQL), then launches clone_bg.cmd. The
+rem finalize step near the end confirms the result (and re-clones synchronously on failure).
+if not defined TESTMODE call :start_bg_clone
 
 rem SQL FIRST - before .NET FW 3.5 / VS, which pend a reboot that makes the choco SQL
 rem package abort ("A system reboot is pending"). Installing it before anything pends a
@@ -2021,6 +2010,22 @@ exit /b 0
 :setstep
 if exist "%CANCEL%" exit /b 1
 >"%STATUS%" echo %~1
+exit /b 0
+
+rem Install Git and launch the repo clone in the background, to overlap the SQL + VS installs.
+rem No-op without a staged gh_token. Runs as a subroutine so the main install flow is untouched.
+:start_bg_clone
+if not exist "%~dp0gh_token.txt" exit /b 0
+if not exist "%~dp0clone_bg.cmd" exit /b 0
+call :netwait
+echo ==== installing Git early for the background clone %DATE% %TIME% ==== >> "%LOG%"
+call choco install -y git >> "%LOG%" 2>&1
+set "PATH=%PATH%;C:\Program Files\Git\cmd"
+if not exist D:\Work md D:\Work
+del "D:\Work\clone_bg.ok" "D:\Work\clone_bg.failed" >nul 2>&1
+echo running> "D:\Work\clone_bg.running"
+echo ==== launching background repo clone %DATE% %TIME% ==== >> "%LOG%"
+start "" /b "%~dp0clone_bg.cmd"
 exit /b 0
 
 :netwait
