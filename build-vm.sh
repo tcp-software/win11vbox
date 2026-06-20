@@ -1289,6 +1289,30 @@ echo CLONED %REPO% - verified
 goto :eof
 EOF
 
+# Background-clone wrapper. install_tools.cmd launches this (via start /b) right after Git is
+# installed, so the repo clone runs CONCURRENTLY with the long SQL Server and Visual Studio
+# installs. It runs clone_repos.cmd and records the outcome with marker files in D:\Work that
+# the finalize step polls: clone_bg.running while in progress, then clone_bg.ok or
+# clone_bg.failed. (Marker files avoid 'set /p' trailing-CR parsing issues.)
+cat > "${VM_DIR}/clone_bg.cmd" <<'EOF'
+@echo off
+set "LOG=D:\Tools\install_tools.log"
+if not exist D:\Work md D:\Work
+del "D:\Work\clone_bg.ok" "D:\Work\clone_bg.failed" >nul 2>&1
+echo running> "D:\Work\clone_bg.running"
+echo ==== [bg clone] start %DATE% %TIME% ==== >> "%LOG%"
+cmd /c "%~dp0clone_repos.cmd" >> "%LOG%" 2>&1
+if errorlevel 1 (
+  echo failed> "D:\Work\clone_bg.failed"
+  echo ==== [bg clone] FAILED %DATE% %TIME% ==== >> "%LOG%"
+) else (
+  echo ok> "D:\Work\clone_bg.ok"
+  echo ==== [bg clone] OK %DATE% %TIME% ==== >> "%LOG%"
+)
+del "D:\Work\clone_bg.running" >nul 2>&1
+exit /b 0
+EOF
+
 cat > "${VM_DIR}/setup_cygwin_ssh.sh" <<'EOF'
 #!/bin/bash
 set -euo pipefail
@@ -1790,6 +1814,25 @@ if defined TESTMODE ( call :dummy chocolatey ) else (
   if defined CACHE call choco config set cacheLocation "V:\choco" >> "%LOG%" 2>&1
 )
 
+rem --- Start the repo clone EARLY, in the BACKGROUND, so it overlaps the long SQL Server and
+rem Visual Studio installs below. The clone only needs Git (not SQL/VS), so install Git now -
+rem it doesn't pend a reboot, so it's safe before SQL - then kick off clone_bg.cmd with
+rem 'start /b'. By the time VS finishes, the repos are already cloned + verified; the finalize
+rem step near the end just confirms that (and retries synchronously if the background clone
+rem failed or never ran). Git is reinstalled idempotently in step 4 as a fallback. Skipped in
+rem TESTMODE and when no gh_token is staged.
+if not defined TESTMODE if exist "%~dp0gh_token.txt" if exist "%~dp0clone_bg.cmd" (
+  call :netwait
+  echo ==== installing Git early for the background clone %DATE% %TIME% ==== >> "%LOG%"
+  call choco install -y git >> "%LOG%" 2>&1
+  set "PATH=!PATH!;C:\Program Files\Git\cmd"
+  if not exist D:\Work md D:\Work
+  del "D:\Work\clone_bg.ok" "D:\Work\clone_bg.failed" >nul 2>&1
+  echo running> "D:\Work\clone_bg.running"
+  echo ==== launching background repo clone %DATE% %TIME% ==== >> "%LOG%"
+  start "" /b "%~dp0clone_bg.cmd"
+)
+
 rem SQL FIRST - before .NET FW 3.5 / VS, which pend a reboot that makes the choco SQL
 rem package abort ("A system reboot is pending"). Installing it before anything pends a
 rem reboot is the reliable fix. Retry up to 3x. choco downloads the Developer .iso + runs Setup.
@@ -1921,22 +1964,43 @@ if defined MISSING (
   schtasks /delete /tn TCPInstallTools /f >nul 2>&1
   schtasks /delete /tn TCPSetupWindow /f >nul 2>&1
 )
-rem Clone repos LAST, AFTER the status is recorded. This validation step has hung the
-rem installer before the completion write, so it must never gate completion/export.
-echo ==== cloning repos %DATE% %TIME% ==== >> "%LOG%"
+rem Finalize the repo clone, AFTER the completion status is recorded (it must never gate
+rem completion/export). The clone was started in the BACKGROUND right after Git installed, so
+rem it overlapped the SQL + VS installs and is normally already done. Marker files in D:\Work
+rem report its state: clone_bg.ok / clone_bg.failed / clone_bg.running. Skip if it already
+rem succeeded, wait if it's still running, and clone synchronously (with retry) if it failed or
+rem never started.
+echo ==== finalizing repo clone %DATE% %TIME% ==== >> "%LOG%"
+set "CLONE_RESULT="
+set "BGWAIT=0"
+:clone_bg_wait
+if exist "D:\Work\clone_bg.ok" ( echo background clone finished OK - skipping re-clone >> "%LOG%" & set "CLONE_RESULT=OK" & goto :clone_finalize )
+if exist "D:\Work\clone_bg.failed" ( echo background clone FAILED - re-cloning synchronously >> "%LOG%" & goto :clone_sync )
+if not exist "D:\Work\clone_bg.running" goto :clone_sync
+set /a BGWAIT+=1
+if !BGWAIT! EQU 1 echo background clone still in progress - waiting... >> "%LOG%"
+if !BGWAIT! GTR 180 ( echo background clone wait timed out ^(~30 min^) - re-cloning synchronously >> "%LOG%" & goto :clone_sync )
+ping -n 11 127.0.0.1 >nul
+goto :clone_bg_wait
+
+:clone_sync
+echo ==== cloning repos synchronously %DATE% %TIME% ==== >> "%LOG%"
+set "CLONE_RESULT=FAILED"
 if exist "%~dp0clone_repos.cmd" (
   cmd /c "%~dp0clone_repos.cmd" >> "%LOG%" 2>&1
-  if errorlevel 1 (
-    echo ==== CLONE STAGE FAILED - working tree incomplete, build stage must not run %DATE% %TIME% ==== >> "%LOG%"
-    if not exist D:\Work md D:\Work
-    >"D:\Work\clone_status.txt" echo CLONE-FAILED
-  ) else (
-    echo ==== CLONE STAGE OK %DATE% %TIME% ==== >> "%LOG%"
-    if not exist D:\Work md D:\Work
-    >"D:\Work\clone_status.txt" echo CLONE-OK
-    rem Optional post-build chain (only if --post-build staged the marker), after a verified clone.
-    if exist "%~dp0post_build.do" if exist "%~dp0post_build.cmd" cmd /c "%~dp0post_build.cmd"
-  )
+  if errorlevel 1 ( set "CLONE_RESULT=FAILED" ) else ( set "CLONE_RESULT=OK" )
+)
+
+:clone_finalize
+if not exist D:\Work md D:\Work
+if "!CLONE_RESULT!"=="OK" (
+  echo ==== CLONE STAGE OK %DATE% %TIME% ==== >> "%LOG%"
+  >"D:\Work\clone_status.txt" echo CLONE-OK
+  rem Optional post-build chain (only if --post-build staged the marker), after a verified clone.
+  if exist "%~dp0post_build.do" if exist "%~dp0post_build.cmd" cmd /c "%~dp0post_build.cmd"
+) else (
+  echo ==== CLONE STAGE FAILED - working tree incomplete, build stage must not run %DATE% %TIME% ==== >> "%LOG%"
+  >"D:\Work\clone_status.txt" echo CLONE-FAILED
 )
 rem OVA hygiene: delete the plaintext credentials staged in C:\Setup so the exported
 rem appliance never carries the GitHub token or AWS keys. Clone + NuGet config already ran.
@@ -2206,7 +2270,7 @@ EOF
   STAGE_DIR=$(mktemp -d)
   for f in bypass_checks.reg post_install_setup.sh setup_env_vars.cmd setup_powershell.ps1 \
            setup_nuget_source.cmd configure_credentials.cmd create_sql_logins.sql run_sql_logins.cmd build_server.sh \
-           build_client.sh start_servers.sh select_we.sh post_build.cmd clone_repos.sh clone_repos.cmd setup_cygwin_ssh.sh setup_nginx.sh firstlogon.cmd \
+           build_client.sh start_servers.sh select_we.sh post_build.cmd clone_repos.sh clone_repos.cmd clone_bg.cmd setup_cygwin_ssh.sh setup_nginx.sh firstlogon.cmd \
            install_cygwin.cmd install_tools.cmd show_progress.ps1 run_setup.cmd setup-x86_64.exe README.md; do
     [[ -f "${VM_DIR}/${f}" ]] && cp "${VM_DIR}/${f}" "$STAGE_DIR/"
   done
