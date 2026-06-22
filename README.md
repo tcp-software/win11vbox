@@ -83,6 +83,7 @@ didn't run. The whole host run is tee'd to
 | `--export DIR` | After the build, power off and export a portable OVA into host directory `DIR` |
 | `--export-only DIR` | Skip the build; export the VM already in the running container into `DIR` |
 | `--dry-run` | Stage a marker so the in-guest tool install runs dummy steps (each sleeps a few seconds) to verify the whole flow in minutes; no credentials needed |
+| `--clean` | Remove an existing same-named VM (and leftover VM files) before building, instead of resuming it. Without it, an existing VM resumes and leftover files abort creation with a clear message telling you to pass `--clean` |
 | `--cpus N` | vCPUs. Default: host cores / 4 (minimum 1) |
 | `--memory MB` / `--vram MB` | Guest RAM / video RAM. Defaults: 8192 / 128 |
 | `--disk-size MB` / `--disk-type fixed\|dynamic` | Disk size and allocation. Defaults: 262144 (256 GB) / dynamic |

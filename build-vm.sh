@@ -37,6 +37,7 @@ HOST_IOCACHE=""
 CFG_PATH=""
 GH_TOKEN="${GH_TOKEN:-}"
 RESUME=false
+CLEAN=false
 EXPORT_FILE=""
 # cfg.zip (server config: TCPCONN.XML etc.) is pulled from ghcr so the post-build step is
 # fully automated - no manual download needed.
@@ -129,6 +130,9 @@ OPTIONS
   --dry-run              Stage a marker so the in-guest tool install runs DUMMY steps (each
                          sleeps ~3s) - verifies the whole flow in minutes, no credentials
                          needed. (Formerly --test.)
+  --clean                Remove an existing VM of the same name (and any leftover VM files)
+                         before building, instead of resuming it. Without it, an existing VM is
+                         resumed, and leftover files abort creation with a clear message.
   --headless             Start the VM headless (auto-selected when no X DISPLAY is present)
   --host-iocache on|off  Force VirtualBox host I/O cache (default: auto - on for
                          overlay/union/ZFS filesystems that can't do O_DIRECT)
@@ -706,6 +710,7 @@ while [[ $# -gt 0 ]]; do
     --bridge-adapter) BRIDGE_ADAPTER="$2"; shift 2 ;;
     --nat) FORCE_NAT=true; shift ;;
     --dry-run) DRY_RUN=true; shift ;;
+    --clean) CLEAN=true; shift ;;
     --headless) START_TYPE=headless; shift ;;
     --log-file) LOG_FILE="$2"; shift 2 ;;
     --host-iocache) HOST_IOCACHE="$2"; shift 2 ;;
@@ -816,13 +821,21 @@ if [[ "$DRY_RUN" != true ]]; then
   fi
 fi
 if VBoxManage showvminfo "$VM_NAME" >/dev/null 2>&1; then
-  # VM already exists: don't recreate it - RESUME the in-guest install instead.
-  # The guest installer is idempotent, so it continues from the last incomplete
-  # step. (To force a clean rebuild, remove the VM first:
-  #   VBoxManage controlvm "$VM_NAME" poweroff; VBoxManage unregistervm "$VM_NAME" --delete)
-  RESUME=true
-  UNATTENDED=true   # ensure the helper scripts + install_tools are (re)generated for the push
-  log_info "VM '$VM_NAME' already exists - RESUME mode: skipping ISO/VM creation; will re-run the in-guest installer."
+  if [[ "$CLEAN" == true ]]; then
+    # --clean: tear the existing VM down (power off + unregister + delete media) so we rebuild
+    # from scratch instead of resuming.
+    log_info "--clean: removing the existing registered VM '$VM_NAME' for a fresh build."
+    VBoxManage controlvm "$VM_NAME" poweroff >/dev/null 2>&1 || true
+    VBoxManage unregistervm "$VM_NAME" --delete >/dev/null 2>&1 || true
+  else
+    # VM already exists: don't recreate it - RESUME the in-guest install instead.
+    # The guest installer is idempotent, so it continues from the last incomplete
+    # step. (To force a clean rebuild, pass --clean, or remove the VM first:
+    #   VBoxManage controlvm "$VM_NAME" poweroff; VBoxManage unregistervm "$VM_NAME" --delete)
+    RESUME=true
+    UNATTENDED=true   # ensure the helper scripts + install_tools are (re)generated for the push
+    log_info "VM '$VM_NAME' already exists - RESUME mode: skipping ISO/VM creation; will re-run the in-guest installer."
+  fi
 fi
 
 if [[ "$FORCE_NAT" == true ]]; then
@@ -838,6 +851,26 @@ else
   VM_DIR="${DEFAULT_FOLDER}/${VM_NAME}"
 fi
 DISK_PATH="${VM_DIR}/${VM_NAME}.vdi"
+
+# Handle leftover VM files. The orchestrator recreates the vmbuilder container each run, so a
+# VM from a previous build is no longer *registered* (the resume check above misses it) but its
+# files still sit on the durable VM-store mount - and 'createvm' then aborts with
+# "Machine settings file '...vbox' already exists". --clean wipes them for a fresh build (we run
+# as root inside the container, so no host sudo needed); otherwise fail fast with a clear message
+# instead of the raw VBoxManage error.
+if [[ "$RESUME" != true ]]; then
+  if [[ "$CLEAN" == true ]]; then
+    [[ -e "$VM_DIR" ]] && { log_info "--clean: clearing existing VM directory $VM_DIR"; rm -rf "$VM_DIR" 2>/dev/null || true; }
+  elif [[ -e "${VM_DIR}/${VM_NAME}.vbox" || -e "$DISK_PATH" ]]; then
+    log_error "A VM named '$VM_NAME' already has files at: $VM_DIR"
+    log_error "(left over from a previous build; the VM isn't registered in this container, so it can't be resumed)."
+    log_error "Re-run with --clean to remove it and rebuild from scratch, e.g.:"
+    log_error "    ./build-vm.sh --unattended --watch --dry-run --clean -y"
+    log_error "Or clear it yourself (the files are root-owned):"
+    log_error "    docker run --rm --user root --entrypoint rm -v \"\${VMSTORE_HOST_DIR:-/mnt/data/win11vbox-vm}\":/vmstore ${VMBUILDER_IMAGE:-ghcr.io/tcp-software/vmbuilder:latest} -rf /vmstore/${VM_NAME}"
+    exit 1
+  fi
+fi
 
 echo "VM Name: $VM_NAME"
 echo "ISO Path: $ISO_PATH"
