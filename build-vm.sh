@@ -20,12 +20,12 @@ UNATTENDED=false
 # DURABLE host path that the orchestrator bind-mounts into the container, so cached
 # downloads survive the container and speed up rebuilds. NOTE: the finished VM/OVA does
 # NOT need this path to run later - it's only used while installing.
-CACHE_HOST_DIR="${CACHE_HOST_DIR:-/mnt/docker.data/win11vbox-cache}"
+CACHE_HOST_DIR="${CACHE_HOST_DIR:-/mnt/data/win11vbox-cache}"
 # The VM (.vdi etc.) goes on a DURABLE host mount, not the container's overlay layer. On the
 # overlay, a hard container kill (OOM/exit-137) loses unflushed VirtualBox writes and rolls
 # the guest disk back (we lost an 8/8 build to this). A bind-mounted host dir + host I/O cache
 # (buffered writes) survives a container restart.
-VMSTORE_HOST_DIR="${VMSTORE_HOST_DIR:-/mnt/docker.data/win11vbox-vm}"
+VMSTORE_HOST_DIR="${VMSTORE_HOST_DIR:-/mnt/data/win11vbox-vm}"
 CACHE_DIR="${CACHE_DIR:-${HOME}/.cache/win11vbox}"
 FORCE_NAT=false
 VBOX_PKG="virtualbox-7.1"
@@ -113,13 +113,13 @@ OPTIONS
   --shared-folder PATH   Share a host folder into the guest at G:
   --cache-dir PATH       In-guest download cache (build-time only; the finished VM/OVA does
                          NOT need it to run later). Default: a DURABLE host folder
-                         ($CACHE_HOST_DIR, default /mnt/docker.data/win11vbox-cache) that the
+                         ($CACHE_HOST_DIR, default /mnt/data/win11vbox-cache) that the
                          orchestrator bind-mounts in, so it survives the container.
   --aws-access-key KEY   AWS access key id  -> guest env var. OPTIONAL: the WebEdition build
   --aws-secret-key SECRET   and local run do NOT need AWS; these are only for runtime AWS
                          features (S3/SES). (or set $AWS_ACCESS_KEY_ID / $AWS_SECRET_ACCESS_KEY)
   --watch                Follow the in-guest install live ([guest]/[log]) and build an
-                         annotated screenshot timelapse under .videos/ (needs no extra tools;
+                         annotated screenshot timelapse under .logs/ (needs no extra tools;
                          ffmpeg is auto-resolved without sudo)
   --export DIR           Wait until EVERYTHING is done (repos cloned, server compiled, all 4
                          servers listening), then power off and export a portable OVA into DIR.
@@ -152,7 +152,7 @@ EXAMPLES
   ./build-vm.sh --unattended --watch -y
 
   # Build, then export a portable OVA appliance into a host folder:
-  ./build-vm.sh --unattended --watch --export /mnt/docker.data/win11-ova -y
+  ./build-vm.sh --unattended --watch --export /mnt/data/win11-ova -y
 
   # Fast end-to-end DRY RUN (dummy installs, ~minutes; no credentials needed):
   ./build-vm.sh --unattended --dry-run --watch -y
@@ -161,7 +161,7 @@ EXAMPLES
   ./build-vm.sh --unattended -y
 
   # Export only - the VM is already built in the running container, no rebuild:
-  ./build-vm.sh --export-only /mnt/docker.data/win11-ova
+  ./build-vm.sh --export-only /mnt/data/win11-ova
 EOF
 }
 
@@ -510,7 +510,7 @@ for _a in "$@"; do case "$_a" in -h|--help) print_help; exit 0 ;; esac; done
 HC="vmbuilder_run"
 HVM="$VM_NAME"
 HREPO="$(cd "$(dirname "$0")" && pwd)"
-HVID="$HREPO/.videos"
+HVID="$HREPO/.logs"
 # '|| true' is REQUIRED: under 'set -euo pipefail', if /usr/share/fonts is absent (as in the
 # container) find exits non-zero, pipefail propagates it, and the bare assignment would make
 # set -e kill the whole script here - silently, before ensure_virtualbox even runs.
@@ -618,7 +618,7 @@ watch_capture(){
     if [[ -n "$full" ]]; then total=$(printf '%s\n' "$full" | wc -l | tr -d ' '); else total=0; fi
     if [[ "$total" -gt "$loglines" ]]; then printf '%s\n' "$full" | sed -n "$((loglines+1)),${total}p" | sed 's/^/[log] /'; loglines=$total; fi
     rel="frames/$(printf 'frame-%05d.png' "$n")"
-    if gx controlvm "$HVM" screenshotpng "/work/win11vbox/.videos/$rel" >/dev/null 2>&1 && [[ -s "$FRAMES/$(printf 'frame-%05d.png' "$n")" ]]; then
+    if gx controlvm "$HVM" screenshotpng "/work/win11vbox/.logs/$rel" >/dev/null 2>&1 && [[ -s "$FRAMES/$(printf 'frame-%05d.png' "$n")" ]]; then
       echo "$(printf 'frame-%05d.png' "$n")|${st:-(starting)}" >> "$MAN"; n=$((n+1))
     fi
     [[ -n "$st" && "$st" != "$last" ]] && { echo "[guest] $(date +%H:%M:%S) $st"; last="$st"; }
@@ -637,9 +637,9 @@ watch_capture(){
   # Tell the in-guest capture to stop, then pull its frames (live desktop, already captioned).
   gx guestcontrol "$HVM" --username dev --password dev run --exe 'C:\Windows\System32\cmd.exe' -- cmd.exe /c "echo stop> D:\\Tools\\capture.stop" >/dev/null 2>&1 || true
   mkdir -p "$GSHOTS"
-  gx guestcontrol "$HVM" --username dev --password dev copyfrom --recursive --target-directory /work/win11vbox/.videos/gshots "D:\\Tools\\shots" >/dev/null 2>&1 || true
+  gx guestcontrol "$HVM" --username dev --password dev copyfrom --recursive --target-directory /work/win11vbox/.logs/gshots "D:\\Tools\\shots" >/dev/null 2>&1 || true
   # Frames are written by the container as root; chown via the container (no host sudo prompt).
-  docker exec "$HC" chown -R "$(id -u):$(id -g)" /work/win11vbox/.videos 2>/dev/null \
+  docker exec "$HC" chown -R "$(id -u):$(id -g)" /work/win11vbox/.logs 2>/dev/null \
     || sudo -n chown -R "$(id -u):$(id -g)" "$HVID" 2>/dev/null || true
   if [[ -z "${FFMPEG:-}" ]]; then log_warn "ffmpeg unavailable - frames saved under $HVID, no video."; return 0; fi
   # Prefer the guest's live captures (already captioned in-guest, never frozen).

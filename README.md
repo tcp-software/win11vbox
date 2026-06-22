@@ -35,7 +35,7 @@ the container or pulled automatically.
 GH_TOKEN=ghp_xxxxxxxx GH_USER=you ./build-vm.sh --unattended -y
 
 # Build, then export a portable OVA appliance to a durable host folder:
-./build-vm.sh --unattended --export /mnt/docker.data/win11-ova -y
+./build-vm.sh --unattended --export /mnt/data/win11-ova -y
 
 # Fast end-to-end dry run (dummy installs, ~minutes, no credentials needed) to verify the flow:
 ./build-vm.sh --unattended --dry-run -y
@@ -53,11 +53,11 @@ Add `--watch` for a live progress stream plus an annotated screenshot timelapse:
 ```bash
 ./build-vm.sh --unattended --watch -y                              # build + annotated timelapse
 ./build-vm.sh --unattended --watch --dry-run -y                    # fast validation with video
-./build-vm.sh --unattended --watch --export /mnt/docker.data/win11-ova -y   # build, video, then export
+./build-vm.sh --unattended --watch --export /mnt/data/win11-ova -y   # build, video, then export
 ```
 
 With `--watch`, the run streams the in-guest install step (`[guest]`) and the raw installer
-log (`[log]`) to the terminal and assembles an mp4 under `.videos/`. The timelapse frames are
+log (`[log]`) to the terminal and assembles an mp4 under `.logs/`. The timelapse frames are
 captured **inside the guest** by `capture_screens.ps1`, which runs in the interactive `dev`
 session, grabs the live desktop every 20 seconds, and burns the current step into each frame.
 That avoids the headless-screenshot freeze: `VBoxManage screenshotpng` returns a frozen image
@@ -67,7 +67,7 @@ timelapse used to get stuck on the SQL step). Capture spans the whole run — th
 startup, each labeled in the caption) — and stops a few frames after all four servers are
 listening. The host still takes its own screenshots as a fallback if the in-guest capture
 didn't run. The whole host run is tee'd to
-`.videos/build-vm-<timestamp>.log`. ffmpeg is resolved automatically (PATH, then
+`.logs/build-vm-<timestamp>.log`. ffmpeg is resolved automatically (PATH, then
 `~/.local/bin`, then a one-time static download) with no `sudo` required.
 
 ## Options
@@ -79,7 +79,7 @@ didn't run. The whole host run is tee'd to
 | `--cfg PATH` | `cfg.zip` server config. Optional; auto-pulled from `ghcr.io/tcp-software/we-cfg:latest` if omitted |
 | `--gh-token TOKEN` / `--gh-user USER` | GitHub credentials for the clone and NuGet source. Required for a real run; auto-sourced from the `gh` login or `$GH_TOKEN`/`$GH_USER` |
 | `--aws-access-key KEY` / `--aws-secret-key SECRET` | Optional. Set as guest environment variables only. Not needed to build or run the dev server (AWS is used only by runtime features such as S3 and SES) |
-| `--watch` | Follow the install live (`[guest]`/`[log]`) and build an annotated screenshot timelapse under `.videos/` |
+| `--watch` | Follow the install live (`[guest]`/`[log]`) and build an annotated screenshot timelapse under `.logs/` |
 | `--export DIR` | After the build, power off and export a portable OVA into host directory `DIR` |
 | `--export-only DIR` | Skip the build; export the VM already in the running container into `DIR` |
 | `--dry-run` | Stage a marker so the in-guest tool install runs dummy steps (each sleeps a few seconds) to verify the whole flow in minutes; no credentials needed |
@@ -90,7 +90,7 @@ didn't run. The whole host run is tee'd to
 | `--cache-dir PATH` | In-guest download cache (build-time only). Defaults to a durable host folder so cached installers survive the container and speed up rebuilds |
 | `--shared-folder PATH` | Share a host folder into the guest at `G:` |
 | `--host-iocache on\|off` | Force the VirtualBox host I/O cache. Default: auto (on for overlay, union, and ZFS filesystems) |
-| `--log-file PATH` | Tee the in-guest build transcript here. The host run is also logged to `.videos/build-vm-<timestamp>.log` |
+| `--log-file PATH` | Tee the in-guest build transcript here. The host run is also logged to `.logs/build-vm-<timestamp>.log` |
 | `--vm-name NAME` / `--base-folder PATH` | VM name and parent directory |
 | `--skip-install` | Do not create a VM; only ensure VirtualBox is installed |
 | `-y`, `--yes` | Do not prompt for confirmation |
@@ -162,8 +162,8 @@ host-only and is used by default only because bridged has no DHCP inside the con
 Add `--export DIR` to a build, or export a VM that is already built without rebuilding:
 
 ```bash
-./build-vm.sh --unattended --export /mnt/docker.data/win11-ova -y   # build, then export
-./build-vm.sh --export-only /mnt/docker.data/win11-ova              # export the existing VM, no rebuild
+./build-vm.sh --unattended --export /mnt/data/win11-ova -y   # build, then export
+./build-vm.sh --export-only /mnt/data/win11-ova              # export the existing VM, no rebuild
 ```
 
 Export powers the VM off (the servers restart on the next boot), exports the VM to an OVA in
@@ -178,7 +178,7 @@ through File > Import Appliance.
 - **Server config (`cfg.zip`):** auto-pulled from ghcr and applied during the build. Provide
   a local copy with `--cfg PATH` to override.
 - **Cache:** the download cache defaults to a durable host folder
-  (`/mnt/docker.data/win11vbox-cache`, override with `$CACHE_HOST_DIR`) that the orchestrator
+  (`/mnt/data/win11vbox-cache`, override with `$CACHE_HOST_DIR`) that the orchestrator
   bind-mounts in, so cached installers survive the container and speed up rebuilds. The
   finished VM does not need the cache to run.
 
@@ -208,7 +208,7 @@ restart the servers with `C:\Setup\start_servers.sh all`.
     run --exe 'C:\Windows\System32\cmd.exe' -- cmd.exe /c "type D:\Tools\install_status.txt"
   ```
   The status protocol in `install_status.txt` is `N/8 <step>`, `WAIT <msg>`, `ERROR <msg>`,
-  or `8/8 Setup complete`. The host run is logged to `.videos/build-vm-<timestamp>.log`; the
+  or `8/8 Setup complete`. The host run is logged to `.logs/build-vm-<timestamp>.log`; the
   full in-guest install log is `D:\Tools\install_tools.log`.
 - **`WAIT Network unavailable`** means the guest has no internet. Inside the container that
   means a bridged NIC with no DHCP; use NAT (the default). A running VM can be switched live
