@@ -161,8 +161,10 @@ so build with a **bridged** adapter (`--bridge-adapter NAME`) for real-device te
 host-only and is used by default only because bridged has no DHCP inside the container. The
 build opens inbound TCP for the server ports (8008/8010/8012/8014) so a bridged device can
 reach the hub — otherwise Windows Firewall silently drops the connection (it blocks inbound by
-default and only port 22 for SSH would be open). `AppServerApi` (8008) binds `127.0.0.1`, so
-only the hub/admin/workstation ports are reachable off-box; devices use `TerminalHubApi` (8010).
+default and only port 22 for SSH would be open). All four servers bind every interface
+(`0.0.0.0`): `cfg.zip` ships `AppServerApi.config` with `ApiServerHost` set to `127.0.0.1`
+(localhost only), so the build rewrites it to `0.0.0.0` to match the other servers and let a
+device reach `AppServerApi` directly. Devices normally connect through `TerminalHubApi` (8010).
 
 ## Exporting an OVA Appliance
 

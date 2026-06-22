@@ -1183,7 +1183,13 @@ for s in AppServerApi AdmServerApi TerminalHubApi WorkstationHubApi; do
 done
 # AppServerApi (net10.0) rejects XML namespaces in its config; strip them from its copy.
 sed -i 's/ xmlns:xsi="[^"]*"//g; s/ xmlns:xsd="[^"]*"//g' "$IFACE/AppServerApi/cfg/AppServerApi.config" 2>/dev/null
+# AppServerApi builds its Kestrel bind URL from <ApiServerHost>:<ApiServerPort>, and cfg.zip
+# ships ApiServerHost=127.0.0.1, so it binds http://127.0.0.1:8008 (localhost only) - a clock
+# device on a bridged network then can't reach it. AdmServerApi ships 0.0.0.0 in the same field
+# (which is why it binds all interfaces); match that so AppServerApi listens on every interface.
+sed -i 's#<ApiServerHost>127\.0\.0\.1</ApiServerHost>#<ApiServerHost>0.0.0.0</ApiServerHost>#' "$IFACE/AppServerApi/cfg/AppServerApi.config" 2>/dev/null
 echo "AppServerApi cfg line2: $(sed -n 2p "$IFACE/AppServerApi/cfg/AppServerApi.config" 2>/dev/null)"
+echo "AppServerApi bind host: $(grep -oE '<ApiServerHost>[^<]*</ApiServerHost>' "$IFACE/AppServerApi/cfg/AppServerApi.config" 2>/dev/null | head -1)"
 echo "per-server cfg setup complete"
 EOF
 chmod +x "${VM_DIR}/setup_server_cfg.sh"
@@ -1502,8 +1508,8 @@ rem --- Open inbound TCP for the WebEdition server ports so a clock device on a 
 rem can reach them. Windows Firewall blocks inbound by default and the install only opens port 22
 rem (sshd), so without this a bridged device's connection to the hub is silently dropped (it
 rem hangs) even though the server is listening. TerminalHubApi (8010) is the device-facing port;
-rem AppServerApi (8008) binds localhost so external traffic can't reach it regardless, but it's
-rem included for completeness. Idempotent (keyed by rule name).
+rem AppServerApi (8008) now binds all interfaces too (see setup_server_cfg.sh - ApiServerHost
+rem 0.0.0.0), so a device that talks to it directly can reach it. Idempotent (keyed by rule name).
 echo post_build: opening firewall for WebEdition ports (8008/8010/8012/8014)... >> "%LOG%"
 powershell -NoProfile -ExecutionPolicy Bypass -Command "if (-not (Get-NetFirewallRule -Name TCPWebEdition -ErrorAction SilentlyContinue)) { New-NetFirewallRule -Name TCPWebEdition -DisplayName 'TCP WebEdition servers' -Enabled True -Direction Inbound -Protocol TCP -Action Allow -LocalPort 8008,8010,8012,8014 }" >> "%LOG%" 2>&1
 
