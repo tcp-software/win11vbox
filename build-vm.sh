@@ -515,13 +515,14 @@ HVID="$HREPO/.logs"
 # container) find exits non-zero, pipefail propagates it, and the bare assignment would make
 # set -e kill the whole script here - silently, before ensure_virtualbox even runs.
 HFONT="$(find /usr/share/fonts -name 'DejaVuSans.ttf' 2>/dev/null | head -1 || true)"
-WATCH=false; EXPORT_DIR=""; EXPORT_ONLY=""; _pv=""
+WATCH=false; EXPORT_DIR=""; EXPORT_ONLY=""; DRYRUN=false; _pv=""
 for _a in "$@"; do
   case "$_pv" in
     --export)      EXPORT_DIR="$_a" ;;
     --export-only) EXPORT_DIR="$_a"; EXPORT_ONLY=1 ;;
   esac
   [[ "$_a" == "--watch" ]] && WATCH=true
+  [[ "$_a" == "--dry-run" ]] && DRYRUN=true
   _pv="$_a"
 done
 
@@ -623,7 +624,11 @@ watch_capture(){
     fi
     [[ -n "$st" && "$st" != "$last" ]] && { echo "[guest] $(date +%H:%M:%S) $st"; last="$st"; }
     # Keep capturing past 8/8 through the post-build phases; stop once all four servers listen.
-    case "$st" in *"Setup complete"*) [[ "$post88" != true ]] && echo "[guest] reached 8/8 - capturing through clone, build, and server startup..."; post88=true ;; esac
+    # A dry run does no clone/build and never starts servers, so stop at 8/8 instead of waiting.
+    case "$st" in *"Setup complete"*)
+      if [[ "$DRYRUN" == true ]]; then echo "[guest] reached 8/8 (dry-run; no servers start) - capture complete"; break; fi
+      [[ "$post88" != true ]] && echo "[guest] reached 8/8 - capturing through clone, build, and server startup..."; post88=true ;;
+    esac
     if [[ "$post88" == true ]]; then
       ns="$(gx guestcontrol "$HVM" --username dev --password dev run --exe 'C:\Windows\System32\cmd.exe' -- cmd.exe /c 'netstat -ano -p tcp' 2>/dev/null | tr -d '\r' || true)"
       ready=true; for p in 8008 8010 8012 8014; do printf '%s\n' "$ns" | grep -E ":$p\b" | grep -q LISTENING || ready=false; done
@@ -1987,6 +1992,8 @@ if defined TESTMODE (
   echo ==== install_tools TEST finished %DATE% %TIME% ==== >> "%LOG%"
   echo [TEST] would clone repos: tcp-cs-60, tcp-tl-70 >> "%LOG%"
   >"%STATUS%" echo 8/8 Setup complete - tools installed, repos cloned [test]
+  rem Dry run starts no servers, so signal the timelapse capture to stop now (no ports to wait on).
+  >"D:\Tools\capture.stop" echo stop
   goto :realend
 )
 
