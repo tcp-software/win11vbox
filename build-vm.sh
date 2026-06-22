@@ -1087,6 +1087,43 @@ echo "Client build complete."
 EOF
 chmod +x "${VM_DIR}/build_client.sh"
 
+# Give each WebEdition server its OWN per-instance cfg dir, populated from the applied cfg.
+# Run from post_build AFTER the build (so the build's nant clean can't wipe it) and from
+# post_build's ELEVATED context (so the files are accessible to the servers, which also run
+# elevated via TCPStartServers). The repo launchers read each server's config from a per-server
+# dir - AppServerApi (net10.0) from ..\..\..\cfg (bin\Debug\net10.0) and the .NET FW servers
+# from ..\..\cfg (bin\Debug), both resolving to Src\Interface\<Server>\cfg - NOT the shared
+# Src\Interface\cfg where cfg.zip is applied. If that per-server dir is missing the server
+# writes a default config that uses port 8008 for ALL of them and they collide. Recreate the
+# dirs FRESH (a stale dir keeps bad ACLs), then: strip the xsd/xsi XML namespaces from
+# AppServerApi.config (net10.0's config loader rejects XML namespaces - the .NET FW servers
+# tolerate them); and clear read-only + grant the dev account full control, because AppServerApi
+# opens its config read/write and the cfg.zip-extracted source can carry restrictive ACLs
+# (a missing/locked AppServerApi.config makes net10.0 fail with UnauthorizedAccessException).
+cat > "${VM_DIR}/setup_server_cfg.sh" <<'EOF'
+#!/bin/bash
+set -uo pipefail
+IFACE=/cygdrive/d/Work/tcp-we-71/server/Src/Interface
+SHARED="$IFACE/cfg"
+[[ -f "$SHARED/AppServerApi.config" ]] || { echo "WARNING: $SHARED/AppServerApi.config missing - was cfg.zip applied?" >&2; }
+for s in AppServerApi AdmServerApi TerminalHubApi WorkstationHubApi; do
+  d="$IFACE/$s/cfg"
+  rm -rf "$d" 2>/dev/null
+  mkdir -p "$d"
+  cp -rf "$SHARED/." "$d/" 2>/dev/null
+  chmod -R 777 "$d" 2>/dev/null
+  dw="$(cygpath -w "$d" 2>/dev/null || echo "$d")"
+  cmd /c "attrib -r \"$dw\\*.*\" /s" >/dev/null 2>&1 || true
+  cmd /c "icacls \"$dw\" /grant dev:(OI)(CI)F /T" >/dev/null 2>&1 || true
+  echo "cfg ready: $s port=$(grep -oE '<ApiServerPort>[0-9]+</ApiServerPort>' "$d/$s.config" 2>/dev/null | head -1)"
+done
+# AppServerApi (net10.0) rejects XML namespaces in its config; strip them from its copy.
+sed -i 's/ xmlns:xsi="[^"]*"//g; s/ xmlns:xsd="[^"]*"//g' "$IFACE/AppServerApi/cfg/AppServerApi.config" 2>/dev/null
+echo "AppServerApi cfg line2: $(sed -n 2p "$IFACE/AppServerApi/cfg/AppServerApi.config" 2>/dev/null)"
+echo "per-server cfg setup complete"
+EOF
+chmod +x "${VM_DIR}/setup_server_cfg.sh"
+
 # Start the WebEdition runtime servers that clients (incl. clock devices like linclock)
 # connect to. Each is a long-running .NET server reading the cfg dir; we launch them in the
 # background and log to D:\Tools\serverlogs. The guide only documents starting App + Admin;
@@ -1183,7 +1220,11 @@ git pull --ff-only 2>/dev/null || true
 echo ">>> Rebuilding server"; /cygdrive/c/Setup/build_server.sh || { echo "server build failed" >&2; exit 1; }
 echo ">>> Rebuilding client"; /cygdrive/c/Setup/build_client.sh || { echo "client build failed" >&2; exit 1; }
 echo ">>> Restoring test DB"; ( cd "$WE/server" && nant __restore-db-prod-test ) || echo "WARN: DB restore failed (check cfg)."
-echo ">>> Done. Restart the servers: C:\\Setup\\start_servers.sh all"
+# Repopulate the per-server cfg dirs: the rebuild's nant clean can wipe them, and AppServerApi
+# (net10.0) needs its namespace-stripped, accessible config. Run elevated (Cygwin-as-admin) so
+# the servers can read it; start_servers also needs elevation for SQL integrated auth.
+echo ">>> Refreshing per-server cfg"; /cygdrive/c/Setup/setup_server_cfg.sh || echo "WARN: per-server cfg refresh failed."
+echo ">>> Done. Restart the servers (elevated): C:\\Setup\\start_servers.sh all"
 EOF
 chmod +x "${VM_DIR}/select_we.sh"
 
@@ -1374,19 +1415,18 @@ if defined SQLCMD ( if exist "%HERE%create_sql_logins.sql" "%SQLCMD%" -S localho
 echo post_build: scaffolding nginx... >> "%LOG%"
 "!BASH!" -lc "/cygdrive/c/Setup/setup_nginx.sh" >> "%LOG%" 2>&1
 
-rem --- Give each server its OWN per-instance cfg dir, from the applied cfg ---
-rem The repo launchers (server/Etc/Util/start-tcp*-server.sh) read each server's config from a
-rem PER-SERVER cfg dir - Src\Interface\<Server>\cfg (AppServerApi: ..\..\..\cfg from
-rem bin\Debug\net10.0 ; the .NET FW servers: ..\..\cfg from bin\Debug) - NOT the shared
-rem Src\Interface\cfg where cfg.zip was applied above. When that per-server dir is missing the
-rem server writes its OWN default config, which uses port 8008 for ALL of them, so they collide
-rem on 8008 (only the first to start binds; the rest die with AddressAlreadyInUse). So copy the
-rem applied cfg into each per-server dir. Then strip the xsd/xsi XML namespaces from
-rem AppServerApi's config: AppServerApi targets net10.0, whose config loader rejects XML
-rem namespaces ("XML namespaces are not supported"); the .NET FW servers tolerate them. (Only
-rem AppServerApi.config needs this - TCPCONN.XML parses fine under net10.0.)
-echo post_build: populating per-server cfg dirs from applied cfg... >> "%LOG%"
-"!BASH!" -lc "IFACE=/cygdrive/d/Work/tcp-we-71/server/Src/Interface; for s in AppServerApi AdmServerApi TerminalHubApi WorkstationHubApi; do mkdir -p \"$IFACE/$s/cfg\"; cp -rf \"$IFACE/cfg/.\" \"$IFACE/$s/cfg/\"; done; sed -i 's/ xmlns:xsi=\"[^\"]*\"//g; s/ xmlns:xsd=\"[^\"]*\"//g' \"$IFACE/AppServerApi/cfg/AppServerApi.config\"; echo per-server cfg populated" >> "%LOG%" 2>&1
+rem --- Give each server its OWN per-instance cfg dir, from the applied cfg (setup_server_cfg.sh) ---
+rem The repo launchers read each server's config from a PER-SERVER dir Src\Interface\<Server>\cfg
+rem (AppServerApi: ..\..\..\cfg from bin\Debug\net10.0 ; the .NET FW servers: ..\..\cfg from
+rem bin\Debug), NOT the shared Src\Interface\cfg where cfg.zip was applied. If that dir is missing
+rem the server writes a default config on port 8008 and all four collide. setup_server_cfg.sh
+rem recreates each per-server dir FRESH from the applied cfg, strips the XML namespaces from
+rem AppServerApi.config (net10.0 rejects them), and clears read-only + grants the dev account
+rem access (AppServerApi opens its config read/write; the cfg.zip source can carry restrictive
+rem ACLs -> UnauthorizedAccessException). Runs here, AFTER the build (nant clean can't wipe it)
+rem and in post_build's ELEVATED context (so the files are accessible to the elevated servers).
+echo post_build: setting up per-server cfg dirs... >> "%LOG%"
+if exist "%~dp0setup_server_cfg.sh" ( "!BASH!" -lc "/cygdrive/c/Setup/setup_server_cfg.sh" >> "%LOG%" 2>&1 ) else ( echo post_build: setup_server_cfg.sh missing - skipping per-server cfg >> "%LOG%" )
 
 rem --- Auto-start all WebEdition servers on EVERY boot (persistent) via a scheduled task
 rem that runs at startup as dev. start_servers.sh backgrounds the servers and returns, and
@@ -2213,7 +2253,7 @@ EOF
   STAGE_DIR=$(mktemp -d)
   for f in bypass_checks.reg post_install_setup.sh setup_env_vars.cmd setup_powershell.ps1 \
            setup_nuget_source.cmd configure_credentials.cmd create_sql_logins.sql run_sql_logins.cmd build_server.sh \
-           build_client.sh start_servers.sh select_we.sh post_build.cmd clone_repos.sh clone_repos.cmd setup_cygwin_ssh.sh setup_nginx.sh firstlogon.cmd \
+           build_client.sh setup_server_cfg.sh start_servers.sh select_we.sh post_build.cmd clone_repos.sh clone_repos.cmd setup_cygwin_ssh.sh setup_nginx.sh firstlogon.cmd \
            install_cygwin.cmd install_tools.cmd show_progress.ps1 run_setup.cmd setup-x86_64.exe README.md; do
     [[ -f "${VM_DIR}/${f}" ]] && cp "${VM_DIR}/${f}" "$STAGE_DIR/"
   done

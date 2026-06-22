@@ -110,11 +110,16 @@ and restore steps (they land on the machine PATH only after their installers fin
 shell that started earlier won't otherwise see them).
 
 **Per-server config:** each launcher reads config from a per-server directory
-(`server\Src\Interface\<Server>\cfg`), not the shared `cfg` where `cfg.zip` is applied, so the
-build copies the applied config into each per-server directory. Without this, every server
-falls back to a default that uses port 8008 and they collide. It also strips the `xsd`/`xsi`
-XML namespaces from `AppServerApi.config`, because AppServerApi targets .NET 10, whose config
-loader rejects XML namespaces (the .NET Framework servers tolerate them).
+(`server\Src\Interface\<Server>\cfg`), not the shared `cfg` where `cfg.zip` is applied, so
+`setup_server_cfg.sh` copies the applied config into each per-server directory. Without this,
+every server falls back to a default that uses port 8008 and they collide. It runs after the
+build (the build's `nant clean` would otherwise wipe the directories) in the elevated
+post-build context, recreates each directory fresh, strips the `xsd`/`xsi` XML namespaces from
+`AppServerApi.config` (AppServerApi targets .NET 10, whose config loader rejects XML
+namespaces; the .NET Framework servers tolerate them), and clears read-only and grants the
+`dev` account access so AppServerApi can open its config (it reads and writes the file, and the
+`cfg.zip` source can carry restrictive permissions that otherwise cause a startup
+`UnauthorizedAccessException`).
 
 **Servers:** all four WebEdition servers start on every boot through a scheduled task
 (`TCPStartServers`), so the full stack is up after the build, after a reboot, and in an
