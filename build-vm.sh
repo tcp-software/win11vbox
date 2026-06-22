@@ -1498,6 +1498,15 @@ echo post_build: setting up per-server cfg dirs... >> "%LOG%"
 >"%PHASE%" echo Configuring per-server cfg...
 if exist "%~dp0setup_server_cfg.sh" ( "!BASH!" -lc "/cygdrive/c/Setup/setup_server_cfg.sh" >> "%LOG%" 2>&1 ) else ( echo post_build: setup_server_cfg.sh missing - skipping per-server cfg >> "%LOG%" )
 
+rem --- Open inbound TCP for the WebEdition server ports so a clock device on a bridged network
+rem can reach them. Windows Firewall blocks inbound by default and the install only opens port 22
+rem (sshd), so without this a bridged device's connection to the hub is silently dropped (it
+rem hangs) even though the server is listening. TerminalHubApi (8010) is the device-facing port;
+rem AppServerApi (8008) binds localhost so external traffic can't reach it regardless, but it's
+rem included for completeness. Idempotent (keyed by rule name).
+echo post_build: opening firewall for WebEdition ports (8008/8010/8012/8014)... >> "%LOG%"
+powershell -NoProfile -ExecutionPolicy Bypass -Command "if (-not (Get-NetFirewallRule -Name TCPWebEdition -ErrorAction SilentlyContinue)) { New-NetFirewallRule -Name TCPWebEdition -DisplayName 'TCP WebEdition servers' -Enabled True -Direction Inbound -Protocol TCP -Action Allow -LocalPort 8008,8010,8012,8014 }" >> "%LOG%" 2>&1
+
 rem --- Auto-start all WebEdition servers on EVERY boot (persistent) via a scheduled task
 rem that runs at startup as dev. start_servers.sh backgrounds the servers and returns, and
 rem Task Scheduler does not kill the detached children, so they keep running. Then run it

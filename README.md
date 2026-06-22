@@ -158,7 +158,11 @@ A clock device such as a **linclock** connects to `TerminalHubApi` (which in tur
 `AppServerApi` and SQL Server). To point a device at this VM, set its NetworkSettings
 `serverUrl` to the VM's IP address. The device must be able to reach the VM on the network,
 so build with a **bridged** adapter (`--bridge-adapter NAME`) for real-device testing; NAT is
-host-only and is used by default only because bridged has no DHCP inside the container.
+host-only and is used by default only because bridged has no DHCP inside the container. The
+build opens inbound TCP for the server ports (8008/8010/8012/8014) so a bridged device can
+reach the hub — otherwise Windows Firewall silently drops the connection (it blocks inbound by
+default and only port 22 for SSH would be open). `AppServerApi` (8008) binds `127.0.0.1`, so
+only the hub/admin/workstation ports are reachable off-box; devices use `TerminalHubApi` (8010).
 
 ## Exporting an OVA Appliance
 
