@@ -2137,6 +2137,22 @@ Add-Type -AssemblyName System.Drawing
 $statusFile = 'D:\Tools\install_status.txt'
 $cancelFile = 'D:\Tools\install.cancel'
 $logFile    = 'D:\Tools\install_tools.log'
+$phaseFile  = 'D:\Tools\build_phase.txt'
+# Ordered post-build phases (post_build.cmd / clone_repos write these to build_phase.txt). The
+# toolchain (N/8 in install_status.txt) is the install; these are the "finishing" stages. Driving
+# the dialog through them keeps the message box showing the stage actually running - so the
+# timelapse shows every stage instead of freezing on "Setup complete" once tools are installed.
+$phaseOrder = @(
+  'Cloning repositories...',
+  'Building server...',
+  'Building client...',
+  'Restoring test database...',
+  'Configuring per-server cfg...',
+  'Starting WebEdition servers...',
+  'Servers started - waiting for ports'
+)
+$postBuildShown = $false
+$finished = $false
 
 function Trigger-Install {
   schtasks /query /tn TCPInstallTools >$null 2>&1
@@ -2257,11 +2273,43 @@ $uiTimer = New-Object System.Windows.Forms.Timer
 $uiTimer.Interval = 1500
 $uiTimer.Add_Tick({
   try {
-    $line = $null
-    if (Test-Path $statusFile) { 
-      try { $line = (Get-Content $statusFile -ErrorAction Stop | Select-Object -Last 1) } catch {} 
+    # Post-build phase tracking. Once post_build starts writing build_phase.txt, the toolchain
+    # install (N/8) is done; advance the dialog through the clone/build/restore/start phases so
+    # the message box always reflects the stage running now (read from the log via build_phase.txt),
+    # rather than sitting frozen on "Step 8 of 8: Setup complete". This is what makes the timelapse
+    # show every stage. Checked first so it takes over from the N/8 status once finishing begins.
+    $phase = $null
+    if (Test-Path $phaseFile) { try { $phase = (Get-Content $phaseFile -ErrorAction Stop | Select-Object -Last 1) } catch {} }
+    if ($phase -and -not $script:finished) {
+      if (-not $script:postBuildShown) {
+        $script:postBuildShown = $true
+        $title.Text = 'Finishing setup'
+        $msg.Text = 'Tools are installed. Now cloning the repositories, building the server and client, restoring the test database, and starting the WebEdition servers. This also takes a while - please keep the VM running.'
+        $cancelBtn.Visible = $false
+        $bar.Style = 'Continuous'
+      }
+      $idx = [array]::IndexOf($phaseOrder, $phase.Trim())
+      if ($idx -ge 0) { $bar.Value = [math]::Min(100, [int]((($idx + 1) / $phaseOrder.Count) * 100)) }
+      $step.Text = $phase
+      # Finalize once all four WebEdition servers are listening.
+      $allUp = $true
+      foreach ($p in 8008,8010,8012,8014) { if (-not (Get-NetTCPConnection -State Listen -LocalPort $p -ErrorAction SilentlyContinue)) { $allUp = $false; break } }
+      if ($allUp) {
+        $script:finished = $true
+        $bar.Value = 100
+        $step.Text = 'All four servers running (8008 / 8010 / 8012 / 8014)'
+        $step.ForeColor = [System.Drawing.Color]::DarkGreen
+        $uiTimer.Stop()
+        Show-Details (Get-Summary)
+      }
+      return
     }
-    
+
+    $line = $null
+    if (Test-Path $statusFile) {
+      try { $line = (Get-Content $statusFile -ErrorAction Stop | Select-Object -Last 1) } catch {}
+    }
+
     if (-not $line) { return }
 
     # Pattern check to see if the engine status yields structural data: "1/5 Installing..."
