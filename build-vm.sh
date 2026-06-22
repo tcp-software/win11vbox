@@ -1027,12 +1027,16 @@ echo "Precheck passed: $REPO checked out at $(git -C "$REPOW" rev-parse --short 
 
 # --- PATH for the build. NAnt orchestrates MSBuild, which it invokes as the
 # bare name "MSBuild.exe" (msbuild.filename in tcp-we-7.build), so the VS MSBuild
-# bin must be on PATH. The database schema project also shells out to "sed", so a
-# Unix toolchain must be present too - running inside Cygwin already provides
-# sed/grep/coreutils; we only need to add MSBuild and NAnt here. ---
+# bin must be on PATH. NAnt's 'restore' target also runs "dotnet" by bare name, so
+# the .NET SDK dir must be on PATH too - the elevated install task that calls this
+# captured its PATH BEFORE the .NET SDK installed, so a bare 'dotnet' isn't found
+# and the restore fails with "'dotnet' failed to start". The database schema project
+# also shells out to "sed"; running inside Cygwin provides sed/grep/coreutils. ---
 MSBUILD_BIN="/cygdrive/c/Program Files/Microsoft Visual Studio/18/Insiders/MSBuild/Current/Bin"
 NANT_BIN_CYG="/cygdrive/d/Work/tcp-we-thirdparty/Nant/0.92/bin"
-export PATH="${PATH}:${NANT_BIN_CYG}:${MSBUILD_BIN}"
+DOTNET_BIN="/cygdrive/c/Program Files/dotnet"
+export PATH="${DOTNET_BIN}:${PATH}:${NANT_BIN_CYG}:${MSBUILD_BIN}"
+command -v dotnet >/dev/null 2>&1 || echo "WARNING: dotnet not found on PATH (looked in C:\\Program Files\\dotnet) - NAnt restore will fail." >&2
 command -v MSBuild.exe >/dev/null 2>&1 || echo "WARNING: MSBuild.exe not found on PATH - NAnt restore/build will fail." >&2
 command -v sed >/dev/null 2>&1 || echo "WARNING: sed not found on PATH - the database schema build will fail (run this inside Cygwin)." >&2
 
