@@ -162,9 +162,10 @@ host-only and is used by default only because bridged has no DHCP inside the con
 build opens inbound TCP for the server ports (8008/8010/8012/8014) so a bridged device can
 reach the hub — otherwise Windows Firewall silently drops the connection (it blocks inbound by
 default and only port 22 for SSH would be open). All four servers bind every interface
-(`0.0.0.0`): `cfg.zip` ships `AppServerApi.config` with `ApiServerHost` set to `127.0.0.1`
-(localhost only), so the build rewrites it to `0.0.0.0` to match the other servers and let a
-device reach `AppServerApi` directly. Devices normally connect through `TerminalHubApi` (8010).
+(`0.0.0.0`): `cfg.zip` ships `AppServerApi`, `TerminalHubApi`, and `WorkstationHubApi` with
+`ApiServerHost` set to `127.0.0.1` (localhost only — only `AdmServerApi` ships `0.0.0.0`), so
+the build rewrites the other three to `0.0.0.0` so a device can reach any of them directly.
+Devices normally connect through `TerminalHubApi` (8010).
 
 ## Exporting an OVA Appliance
 
