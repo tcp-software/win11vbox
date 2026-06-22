@@ -1,6 +1,6 @@
 # Windows 11 TimeClock Plus Dev VM Builder
 
-<video src="https://github.com" width="600" controls>20260621-024048-timelapse-complete-demo.mp4</video>
+<video src="20260621-024048-timelapse-complete-demo.mp4" width="600" controls></video>
 
 `build-vm.sh` builds a Windows 11 VirtualBox virtual machine and installs a complete
 TimeClock Plus WebEdition development environment, hands-free, from a single command.
