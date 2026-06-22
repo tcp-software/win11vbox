@@ -57,9 +57,13 @@ Add `--watch` for a live progress stream plus an annotated screenshot timelapse:
 ```
 
 With `--watch`, the run streams the in-guest install step (`[guest]`) and the raw installer
-log (`[log]`) to the terminal; captures a screenshot every 30 seconds; burns the real step
-into each frame as a caption (so the video never looks "stuck" even if the in-guest progress
-window freezes); and assembles an mp4 under `.videos/`. The whole host run is tee'd to
+log (`[log]`) to the terminal and assembles an mp4 under `.videos/`. The timelapse frames are
+captured **inside the guest** by `capture_screens.ps1`, which runs in the interactive `dev`
+session, grabs the live desktop every 20 seconds, and burns the current step into each frame.
+That avoids the headless-screenshot freeze: `VBoxManage screenshotpng` returns a frozen image
+in headless mode because the SVGA framebuffer isn't refreshed without a display front-end (the
+timelapse used to get stuck on the SQL step). The host still takes its own screenshots as a
+fallback if the in-guest capture didn't run. The whole host run is tee'd to
 `.videos/build-vm-<timestamp>.log`. ffmpeg is resolved automatically (PATH, then
 `~/.local/bin`, then a one-time static download) with no `sudo` required.
 
@@ -207,7 +211,10 @@ restart the servers with `C:\Setup\start_servers.sh all`.
   means a bridged NIC with no DHCP; use NAT (the default). A running VM can be switched live
   with `VBoxManage controlvm Win11 nic1 nat`.
 - **Screen recording is not used.** VirtualBox's built-in recorder destabilized the guest, so
-  the timelapse is built from non-intrusive periodic screenshots instead.
+  the timelapse is built from periodic screenshots instead. These are captured **inside the
+  guest** (`capture_screens.ps1`, interactive session) rather than via host `screenshotpng`,
+  which freezes on one frame in headless mode (the SVGA framebuffer isn't refreshed without a
+  display front-end).
 - **`l1d-flush-on-vm-entry` is forced off.** Turning it on cripples VM speed and aborts the
   guest during early boot, so it is intentionally not an option.
 - **Resume:** if a VM with the same name exists, the build resumes the idempotent in-guest

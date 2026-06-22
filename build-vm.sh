@@ -599,16 +599,19 @@ wait_for_ready(){
   return 1
 }
 
-# Follow the in-guest install (streaming [guest]/[log]), capture a screenshot every 30s, then
-# annotate each frame with its real step and assemble a timelapse mp4. Non-intrusive: built-in
-# VBox recording is never used (it destabilized the guest).
+# Follow the in-guest install (streaming [guest]/[log]) and assemble a timelapse mp4. Frames
+# come from capture_screens.ps1 running INSIDE the guest's interactive session - it grabs the
+# live desktop and burns the step caption in. That is reliable; host-side VBoxManage
+# screenshotpng in headless mode FREEZES on one image because the SVGA framebuffer isn't
+# refreshed without a display front-end attached (the timelapse used to get stuck on the SQL
+# step). Host screenshots are still taken as a fallback in case the guest capture didn't run.
 watch_capture(){
-  local FRAMES="$HVID/frames" ts MAN OUT n=0 last="" idle=0 loglines=0 full total st rel f s safe
+  local FRAMES="$HVID/frames" GSHOTS="$HVID/gshots" ts MAN OUT n=0 last="" idle=0 loglines=0 full total st rel f s safe
   ts="$(date +%Y%m%d-%H%M%S)"; MAN="$HVID/.frames-${ts}.manifest"; OUT="$HVID/${ts}-timelapse.mp4"
-  # Clear any stale frames from a prior run so the glob doesn't mix two runs into one video.
-  rm -rf "$FRAMES"; mkdir -p "$FRAMES"; : > "$MAN"
+  # Clear stale frames from a prior run so the glob doesn't mix two runs into one video.
+  rm -rf "$FRAMES" "$GSHOTS"; mkdir -p "$FRAMES"; : > "$MAN"
   docker inspect "$HC" >/dev/null 2>&1 || { log_warn "no '$HC' container to watch."; return 0; }
-  log_info "Following the in-guest install + capturing frames (live [guest]/[log] below)..."
+  log_info "Following the in-guest install (frames captured inside the guest; live [guest]/[log] below)..."
   while true; do
     st="$(gst || true)"
     full="$(glg || true)"
@@ -624,10 +627,26 @@ watch_capture(){
     idle=$((idle+1)); [[ $idle -ge 360 ]] && { echo "[guest] 3h cap reached"; break; }
     sleep 30
   done
+  # Tell the in-guest capture to stop, then pull its frames (live desktop, already captioned).
+  gx guestcontrol "$HVM" --username dev --password dev run --exe 'C:\Windows\System32\cmd.exe' -- cmd.exe /c "echo stop> D:\\Tools\\capture.stop" >/dev/null 2>&1 || true
+  mkdir -p "$GSHOTS"
+  gx guestcontrol "$HVM" --username dev --password dev copyfrom --recursive --target-directory /work/win11vbox/.videos/gshots "D:\\Tools\\shots" >/dev/null 2>&1 || true
   # Frames are written by the container as root; chown via the container (no host sudo prompt).
-  docker exec "$HC" chown -R "$(id -u):$(id -g)" /work/win11vbox/.videos/frames 2>/dev/null \
-    || sudo -n chown -R "$(id -u):$(id -g)" "$FRAMES" 2>/dev/null || true
-  if [[ -z "${FFMPEG:-}" ]]; then log_warn "ffmpeg unavailable - $n frames saved in $FRAMES, no video."; return 0; fi
+  docker exec "$HC" chown -R "$(id -u):$(id -g)" /work/win11vbox/.videos 2>/dev/null \
+    || sudo -n chown -R "$(id -u):$(id -g)" "$HVID" 2>/dev/null || true
+  if [[ -z "${FFMPEG:-}" ]]; then log_warn "ffmpeg unavailable - frames saved under $HVID, no video."; return 0; fi
+  # Prefer the guest's live captures (already captioned in-guest, never frozen).
+  local GDIR=""
+  ls "$GSHOTS"/shots/shot-*.png >/dev/null 2>&1 && GDIR="$GSHOTS/shots"
+  [[ -z "$GDIR" ]] && ls "$GSHOTS"/shot-*.png >/dev/null 2>&1 && GDIR="$GSHOTS"
+  if [[ -n "$GDIR" ]]; then
+    local gn; gn=$(ls "$GDIR"/shot-*.png 2>/dev/null | wc -l | tr -d ' ')
+    "$FFMPEG" -y -loglevel error -framerate 10 -pattern_type glob -i "$GDIR/shot-*.png" -vf "scale=trunc(iw/2)*2:trunc(ih/2)*2,format=yuv420p" "$OUT"
+    log_success "timelapse (live in-guest capture): $OUT ($gn frames)"
+    return 0
+  fi
+  # Fallback: assemble from host screenshots (caption each from the manifest). May be frozen.
+  log_warn "no in-guest captures found - assembling from host screenshots (these can be frozen in headless mode)."
   while IFS='|' read -r f s; do
     [[ -s "$FRAMES/$f" ]] || continue
     safe="$(printf '%s' "$s" | tr -cd '[:alnum:] /._-' | cut -c1-70)"
@@ -635,7 +654,7 @@ watch_capture(){
     mv "$FRAMES/$f.a.png" "$FRAMES/$f"
   done < "$MAN"
   "$FFMPEG" -y -loglevel error -framerate 10 -pattern_type glob -i "$FRAMES/frame-*.png" -vf "scale=trunc(iw/2)*2:trunc(ih/2)*2,format=yuv420p" "$OUT"
-  log_success "timelapse: $OUT ($n frames)"
+  log_success "timelapse (host screenshots, fallback): $OUT ($n frames)"
 }
 
 # Run host-side orchestration unless we are already inside the container.
@@ -1712,6 +1731,10 @@ if not exist "D:\Tools" md "D:\Tools"
 >"D:\Tools\install_status.txt" echo 1/8 Preparing background setup
 if exist "C:\Setup\show_progress.ps1" schtasks /create /tn TCPSetupWindow /tr "powershell -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File C:\Setup\show_progress.ps1" /sc onlogon /it /rl limited /f >nul 2>&1
 
+rem Timelapse capture in the INTERACTIVE session (/it) so it grabs the live desktop - headless
+rem host screenshots freeze on one frame. build-vm.sh --watch pulls D:\Tools\shots and assembles.
+if exist "C:\Setup\capture_screens.ps1" schtasks /create /tn TCPCaptureScreens /tr "powershell -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File C:\Setup\capture_screens.ps1" /sc onlogon /it /rl limited /f >nul 2>&1
+
 set "GA="
 for %%d in (C D E F G H I J K L M N O P Q R S T U V W X Y Z) do if exist "%%d:\VBoxWindowsAdditions.exe" set "GA=%%d:"
 if defined GA (
@@ -1967,6 +1990,7 @@ if defined MISSING (
   >"%STATUS%" echo 8/8 Setup complete - tools installed, repos cloned
   schtasks /delete /tn TCPInstallTools /f >nul 2>&1
   schtasks /delete /tn TCPSetupWindow /f >nul 2>&1
+  schtasks /delete /tn TCPCaptureScreens /f >nul 2>&1
 )
 rem Clone repos LAST, AFTER the status is recorded. This validation step has hung the
 rem installer before the completion write, so it must never gate completion/export.
@@ -2221,6 +2245,48 @@ $uiTimer.Start()
 [System.Windows.Forms.Application]::Run($form)
 EOF
 
+# Timelapse frame capture, run INSIDE the guest's interactive session (scheduled /it by
+# firstlogon). It grabs the live desktop every 20s and burns the current install step into each
+# frame, saving to D:\Tools\shots. This replaces host-side VBoxManage screenshotpng, which
+# FREEZES on a single image in headless mode (the SVGA framebuffer isn't refreshed without a
+# display front-end) - that is why the old timelapse got stuck on the SQL step. build-vm.sh
+# --watch (watch_capture) pulls these frames and assembles the mp4. Stops at "8/8 Setup
+# complete"/ERROR, when D:\Tools\capture.stop appears, or after a ~4h cap.
+cat > "${VM_DIR}/capture_screens.ps1" <<'EOF'
+$mutex = New-Object System.Threading.Mutex($false, 'TCPCaptureScreens')
+try { $ok = $mutex.WaitOne(0) } catch [System.Threading.AbandonedMutexException] { $ok = $true }
+if (-not $ok) { exit }
+Add-Type -AssemblyName System.Windows.Forms
+Add-Type -AssemblyName System.Drawing
+$dir = 'D:\Tools\shots'; $statusFile = 'D:\Tools\install_status.txt'; $stopFile = 'D:\Tools\capture.stop'
+New-Item -ItemType Directory -Force -Path $dir | Out-Null
+Remove-Item (Join-Path $dir 'shot-*.png') -Force -ErrorAction SilentlyContinue
+Remove-Item $stopFile -Force -ErrorAction SilentlyContinue
+$n = 0; $maxFrames = 760; $doneSeen = 0
+$font = New-Object System.Drawing.Font('Consolas', 14, [System.Drawing.FontStyle]::Bold)
+$bg = New-Object System.Drawing.SolidBrush ([System.Drawing.Color]::FromArgb(190,0,0,0))
+while ($n -lt $maxFrames) {
+  if (Test-Path $stopFile) { break }
+  $step = ''
+  try { if (Test-Path $statusFile) { $step = (Get-Content $statusFile -ErrorAction Stop | Select-Object -Last 1) } } catch {}
+  try {
+    $vs = [System.Windows.Forms.SystemInformation]::VirtualScreen
+    $bmp = New-Object System.Drawing.Bitmap($vs.Width, $vs.Height)
+    $g = [System.Drawing.Graphics]::FromImage($bmp)
+    $g.CopyFromScreen($vs.Location, [System.Drawing.Point]::Empty, $vs.Size)
+    $txt = ('{0}  {1}' -f (Get-Date -Format 'HH:mm:ss'), $step)
+    $sz = $g.MeasureString($txt, $font)
+    $g.FillRectangle($bg, 6, ($vs.Height - $sz.Height - 10), ($sz.Width + 10), ($sz.Height + 6))
+    $g.DrawString($txt, $font, [System.Drawing.Brushes]::Yellow, 10, ($vs.Height - $sz.Height - 7))
+    $g.Dispose()
+    $bmp.Save((Join-Path $dir ('shot-{0:D5}.png' -f $n)), [System.Drawing.Imaging.ImageFormat]::Png)
+    $bmp.Dispose()
+    $n++
+  } catch {}
+  if ($step -match 'Setup complete' -or $step -match '^ERROR') { $doneSeen++; if ($doneSeen -ge 4) { break } }
+  Start-Sleep -Seconds 20
+}
+EOF
 
   # Manual launcher (desktop shortcut points here) to (re)run the install later.
   # Shows the progress window (non-elevated) and runs the installer elevated (UAC).
@@ -2254,7 +2320,7 @@ EOF
   for f in bypass_checks.reg post_install_setup.sh setup_env_vars.cmd setup_powershell.ps1 \
            setup_nuget_source.cmd configure_credentials.cmd create_sql_logins.sql run_sql_logins.cmd build_server.sh \
            build_client.sh setup_server_cfg.sh start_servers.sh select_we.sh post_build.cmd clone_repos.sh clone_repos.cmd setup_cygwin_ssh.sh setup_nginx.sh firstlogon.cmd \
-           install_cygwin.cmd install_tools.cmd show_progress.ps1 run_setup.cmd setup-x86_64.exe README.md; do
+           install_cygwin.cmd install_tools.cmd show_progress.ps1 capture_screens.ps1 run_setup.cmd setup-x86_64.exe README.md; do
     [[ -f "${VM_DIR}/${f}" ]] && cp "${VM_DIR}/${f}" "$STAGE_DIR/"
   done
   # Dry run (--dry-run): drop the install.test marker into \setup\ so the in-guest tool
