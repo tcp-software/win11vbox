@@ -62,8 +62,11 @@ captured **inside the guest** by `capture_screens.ps1`, which runs in the intera
 session, grabs the live desktop every 20 seconds, and burns the current step into each frame.
 That avoids the headless-screenshot freeze: `VBoxManage screenshotpng` returns a frozen image
 in headless mode because the SVGA framebuffer isn't refreshed without a display front-end (the
-timelapse used to get stuck on the SQL step). The host still takes its own screenshots as a
-fallback if the in-guest capture didn't run. The whole host run is tee'd to
+timelapse used to get stuck on the SQL step). Capture spans the whole run — the toolchain
+(`N/8`), then the post-build phases (cloning, server/client build, database restore, and server
+startup, each labeled in the caption) — and stops a few frames after all four servers are
+listening. The host still takes its own screenshots as a fallback if the in-guest capture
+didn't run. The whole host run is tee'd to
 `.videos/build-vm-<timestamp>.log`. ffmpeg is resolved automatically (PATH, then
 `~/.local/bin`, then a one-time static download) with no `sudo` required.
 

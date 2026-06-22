@@ -606,7 +606,7 @@ wait_for_ready(){
 # refreshed without a display front-end attached (the timelapse used to get stuck on the SQL
 # step). Host screenshots are still taken as a fallback in case the guest capture didn't run.
 watch_capture(){
-  local FRAMES="$HVID/frames" GSHOTS="$HVID/gshots" ts MAN OUT n=0 last="" idle=0 loglines=0 full total st rel f s safe
+  local FRAMES="$HVID/frames" GSHOTS="$HVID/gshots" ts MAN OUT n=0 last="" idle=0 loglines=0 full total st rel f s safe post88=false ns ready p
   ts="$(date +%Y%m%d-%H%M%S)"; MAN="$HVID/.frames-${ts}.manifest"; OUT="$HVID/${ts}-timelapse.mp4"
   # Clear stale frames from a prior run so the glob doesn't mix two runs into one video.
   rm -rf "$FRAMES" "$GSHOTS"; mkdir -p "$FRAMES"; : > "$MAN"
@@ -622,9 +622,16 @@ watch_capture(){
       echo "$(printf 'frame-%05d.png' "$n")|${st:-(starting)}" >> "$MAN"; n=$((n+1))
     fi
     [[ -n "$st" && "$st" != "$last" ]] && { echo "[guest] $(date +%H:%M:%S) $st"; last="$st"; }
-    case "$st" in *"Setup complete"*) echo "[guest] reached 8/8"; break ;; *ERROR*) echo "[guest] installer reported ERROR - stopping capture"; break ;; esac
+    # Keep capturing past 8/8 through the post-build phases; stop once all four servers listen.
+    case "$st" in *"Setup complete"*) [[ "$post88" != true ]] && echo "[guest] reached 8/8 - capturing through clone, build, and server startup..."; post88=true ;; esac
+    if [[ "$post88" == true ]]; then
+      ns="$(gx guestcontrol "$HVM" --username dev --password dev run --exe 'C:\Windows\System32\cmd.exe' -- cmd.exe /c 'netstat -ano -p tcp' 2>/dev/null | tr -d '\r' || true)"
+      ready=true; for p in 8008 8010 8012 8014; do printf '%s\n' "$ns" | grep -E ":$p\b" | grep -q LISTENING || ready=false; done
+      [[ "$ready" == true ]] && { echo "[guest] all four servers listening (8008/8010/8012/8014) - capture complete"; break; }
+    fi
+    case "$st" in *ERROR*) echo "[guest] installer reported ERROR - stopping capture"; break ;; esac
     docker inspect -f '{{.State.Running}}' "$HC" 2>/dev/null | grep -q true || { echo "[guest] container stopped"; break; }
-    idle=$((idle+1)); [[ $idle -ge 360 ]] && { echo "[guest] 3h cap reached"; break; }
+    idle=$((idle+1)); [[ $idle -ge 600 ]] && { echo "[guest] ~5h cap reached - stopping capture"; break; }
     sleep 30
   done
   # Tell the in-guest capture to stop, then pull its frames (live desktop, already captioned).
@@ -1397,6 +1404,8 @@ set "HERE=%~dp0"
 set "LOG=D:\Tools\install_tools.log"
 set "BASH=D:\Tools\cygwin\bin\bash.exe"
 set "IFACE=D:\Work\tcp-we-71\server\Src\Interface"
+rem PHASE: a short label for the timelapse caption (capture_screens.ps1 reads build_phase.txt).
+set "PHASE=D:\Tools\build_phase.txt"
 echo ==== post_build %DATE% %TIME% ==== >> "%LOG%"
 if not exist "!BASH!" ( echo post_build: Cygwin bash missing - cannot build >> "%LOG%" & endlocal & exit /b 1 )
 
@@ -1419,10 +1428,13 @@ rem (e.g. Tcp.Update.dll) and causing intermittent CS2012 "file in use" build fa
 powershell -NoProfile -ExecutionPolicy Bypass -Command "Add-MpPreference -ExclusionPath 'D:\Work' -ErrorAction SilentlyContinue" >> "%LOG%" 2>&1
 
 echo post_build: building server... >> "%LOG%"
+>"%PHASE%" echo Building server...
 "!BASH!" -lc "/cygdrive/c/Setup/build_server.sh" >> "%LOG%" 2>&1
 echo post_build: building client... >> "%LOG%"
+>"%PHASE%" echo Building client...
 "!BASH!" -lc "/cygdrive/c/Setup/build_client.sh" >> "%LOG%" 2>&1
 echo post_build: restoring test DB... >> "%LOG%"
+>"%PHASE%" echo Restoring test database...
 rem nant + sqlcmd + git must be on PATH for this inline step (the caller's PATH predates those
 rem installs, so bare 'sqlcmd'/'git' aren't found - that's why the DB restore failed before).
 rem sqlcmd ships under the SQL Client SDK ODBC Binn, in a version-named dir (glob it at runtime).
@@ -1445,6 +1457,7 @@ rem access (AppServerApi opens its config read/write; the cfg.zip source can car
 rem ACLs -> UnauthorizedAccessException). Runs here, AFTER the build (nant clean can't wipe it)
 rem and in post_build's ELEVATED context (so the files are accessible to the elevated servers).
 echo post_build: setting up per-server cfg dirs... >> "%LOG%"
+>"%PHASE%" echo Configuring per-server cfg...
 if exist "%~dp0setup_server_cfg.sh" ( "!BASH!" -lc "/cygdrive/c/Setup/setup_server_cfg.sh" >> "%LOG%" 2>&1 ) else ( echo post_build: setup_server_cfg.sh missing - skipping per-server cfg >> "%LOG%" )
 
 rem --- Auto-start all WebEdition servers on EVERY boot (persistent) via a scheduled task
@@ -1455,8 +1468,10 @@ rem already a Windows service; SQL Server auto-starts; this brings up the 4 .NET
 echo post_build: installing TCPStartServers boot task ^(all servers^)... >> "%LOG%"
 schtasks /create /tn TCPStartServers /tr "\"D:\Tools\cygwin\bin\bash.exe\" -lc /cygdrive/c/Setup/start_servers.sh all" /sc onstart /ru dev /rp dev /rl highest /f >> "%LOG%" 2>&1
 echo post_build: starting all servers now... >> "%LOG%"
+>"%PHASE%" echo Starting WebEdition servers...
 schtasks /run /tn TCPStartServers >> "%LOG%" 2>&1
 
+>"%PHASE%" echo Servers started - waiting for ports
 echo ==== post_build done %DATE% %TIME% ==== >> "%LOG%"
 endlocal
 exit /b 0
@@ -1995,6 +2010,8 @@ if defined MISSING (
 rem Clone repos LAST, AFTER the status is recorded. This validation step has hung the
 rem installer before the completion write, so it must never gate completion/export.
 echo ==== cloning repos %DATE% %TIME% ==== >> "%LOG%"
+rem Publish a phase label for the timelapse caption (capture_screens.ps1 reads build_phase.txt).
+>"D:\Tools\build_phase.txt" echo Cloning repositories...
 if exist "%~dp0clone_repos.cmd" (
   cmd /c "%~dp0clone_repos.cmd" >> "%LOG%" 2>&1
   if errorlevel 1 (
@@ -2259,16 +2276,24 @@ if (-not $ok) { exit }
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
 $dir = 'D:\Tools\shots'; $statusFile = 'D:\Tools\install_status.txt'; $stopFile = 'D:\Tools\capture.stop'
+$phaseFile = 'D:\Tools\build_phase.txt'
 New-Item -ItemType Directory -Force -Path $dir | Out-Null
 Remove-Item (Join-Path $dir 'shot-*.png') -Force -ErrorAction SilentlyContinue
 Remove-Item $stopFile -Force -ErrorAction SilentlyContinue
-$n = 0; $maxFrames = 760; $doneSeen = 0
+Remove-Item $phaseFile -Force -ErrorAction SilentlyContinue
+# Keep capturing through the toolchain (N/8), then the post-8/8 phases (clone, server/client
+# build, DB restore, server startup). The host (watch_capture) stops us via $stopFile once all
+# four servers are listening; $maxFrames (~5.5h at 20s) is just a safety cap.
+$n = 0; $maxFrames = 1000; $serverUpCount = 0
 $font = New-Object System.Drawing.Font('Consolas', 14, [System.Drawing.FontStyle]::Bold)
 $bg = New-Object System.Drawing.SolidBrush ([System.Drawing.Color]::FromArgb(190,0,0,0))
 while ($n -lt $maxFrames) {
   if (Test-Path $stopFile) { break }
+  # Caption from the post-build phase file when present (it has clone/build/server detail),
+  # otherwise the N/8 install status.
   $step = ''
-  try { if (Test-Path $statusFile) { $step = (Get-Content $statusFile -ErrorAction Stop | Select-Object -Last 1) } } catch {}
+  try { if (Test-Path $phaseFile) { $step = (Get-Content $phaseFile -ErrorAction Stop | Select-Object -Last 1) } } catch {}
+  try { if (-not $step -and (Test-Path $statusFile)) { $step = (Get-Content $statusFile -ErrorAction Stop | Select-Object -Last 1) } } catch {}
   try {
     $vs = [System.Windows.Forms.SystemInformation]::VirtualScreen
     $bmp = New-Object System.Drawing.Bitmap($vs.Width, $vs.Height)
@@ -2283,7 +2308,14 @@ while ($n -lt $maxFrames) {
     $bmp.Dispose()
     $n++
   } catch {}
-  if ($step -match 'Setup complete' -or $step -match '^ERROR') { $doneSeen++; if ($doneSeen -ge 4) { break } }
+  # Stop a few frames after all four WebEdition servers are listening, so the timelapse runs
+  # through (and briefly past) server startup even when the host isn't watching.
+  try {
+    $allUp = $true
+    foreach ($p in 8008,8010,8012,8014) { if (-not (Get-NetTCPConnection -State Listen -LocalPort $p -ErrorAction SilentlyContinue)) { $allUp = $false; break } }
+    if ($allUp) { $serverUpCount++ } else { $serverUpCount = 0 }
+    if ($serverUpCount -ge 3) { break }
+  } catch {}
   Start-Sleep -Seconds 20
 }
 EOF
