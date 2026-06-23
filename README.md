@@ -67,10 +67,13 @@ in headless mode because the SVGA framebuffer isn't refreshed without a display 
 timelapse used to get stuck on the SQL step). Capture spans the whole run — the toolchain
 (`N/8`), then the post-build phases (cloning, server/client build, database restore, and server
 startup, each labeled in the caption) — and stops a few frames after all four servers are
-listening. The host still takes its own screenshots as a fallback if the in-guest capture
-didn't run. The whole host run is tee'd to
-`.logs/build-vm-<timestamp>.log`. ffmpeg is resolved automatically (PATH, then
-`~/.local/bin`, then a one-time static download) with no `sudo` required.
+listening. The in-guest capture can't see the pre-logon Windows install (it runs in the `dev`
+desktop session, which doesn't exist until auto-logon), so the canned install-phase frames in
+`assets/timelapse-install-frames/` are prepended to the video automatically. The host still
+takes its own screenshots as a fallback if the in-guest capture didn't run. The whole host run
+is tee'd to `.logs/build-vm-<timestamp>.log`. After each run, `.logs/latest.log` and
+`.logs/latest-timelapse.mp4` symlink the newest log and video. ffmpeg is resolved automatically
+(PATH, then `~/.local/bin`, then a one-time static download) with no `sudo` required.
 
 ## Options
 

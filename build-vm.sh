@@ -515,6 +515,10 @@ HC="vmbuilder_run"
 HVM="$VM_NAME"
 HREPO="$(cd "$(dirname "$0")" && pwd)"
 HVID="$HREPO/.logs"
+# Canned Windows-install screenshots prepended to the --watch timelapse. The live capture
+# (capture_screens.ps1) only starts at the dev auto-logon, so it misses the pre-logon OS
+# install; these frames fill that gap. Tracked in git (unlike .logs/). See its README.
+HINTRO="$HREPO/assets/timelapse-install-frames"
 # '|| true' is REQUIRED: under 'set -euo pipefail', if /usr/share/fonts is absent (as in the
 # container) find exits non-zero, pipefail propagates it, and the bare assignment would make
 # set -e kill the whole script here - silently, before ensure_virtualbox even runs.
@@ -604,6 +608,39 @@ wait_for_ready(){
   return 1
 }
 
+# Encode a timelapse mp4 from a frame glob ($2, e.g. "$GDIR/shot-*.png"), prepending the canned
+# Windows-install frames from $HINTRO when present so the video covers the pre-logon OS install
+# the live capture can't see. The intro frames are scaled to the live-capture size (scale2ref)
+# so mismatched resolutions still concat cleanly. Echoes the number of intro frames prepended.
+encode_timelapse(){
+  local out="$1" glob="$2" intro_n=0 first w h
+  [[ -d "$HINTRO" ]] && intro_n=$(ls "$HINTRO"/frame-*.png 2>/dev/null | wc -l | tr -d ' ')
+  if [[ "$intro_n" -gt 0 ]]; then
+    # Scale BOTH legs to the live-capture size, then concat - so all frames survive (scale2ref
+    # would couple the two streams' frame counts and truncate the longer one). Probe the size
+    # from the first live frame; fall back to this VM's default 1024x768 if ffprobe is absent.
+    first=$(ls $glob 2>/dev/null | head -1)
+    if [[ -n "$first" && -x "${FFMPEG%ffmpeg}ffprobe" ]]; then
+      IFS=',' read -r w h < <("${FFMPEG%ffmpeg}ffprobe" -v error -select_streams v \
+        -show_entries stream=width,height -of csv=p=0 "$first" 2>/dev/null)
+    fi
+    w="${w:-1024}"; h="${h:-768}"
+    "$FFMPEG" -y -loglevel error \
+      -framerate 10 -start_number 0 -i "$HINTRO/frame-%05d.png" \
+      -framerate 10 -pattern_type glob -i "$glob" \
+      -filter_complex "[0:v]scale=${w}:${h},setsar=1[i];[1:v]scale=${w}:${h},setsar=1[s];[i][s]concat=n=2:v=1:a=0,format=yuv420p[v]" \
+      -map "[v]" "$out"
+  else
+    "$FFMPEG" -y -loglevel error -framerate 10 -pattern_type glob -i "$glob" \
+      -vf "scale=trunc(iw/2)*2:trunc(ih/2)*2,format=yuv420p" "$out"
+  fi
+  echo "$intro_n"
+}
+
+# Point a stable "latest-*" symlink at the freshest artifact (relative target so it stays valid
+# if .logs is moved/copied). Used for the newest build log and the newest timelapse video.
+link_latest(){ ln -sfn "$(basename "$2")" "$HVID/$1" 2>/dev/null || true; }
+
 # Follow the in-guest install (streaming [guest]/[log]) and assemble a timelapse mp4. Frames
 # come from capture_screens.ps1 running INSIDE the guest's interactive session - it grabs the
 # live desktop and burns the step caption in. That is reliable; host-side VBoxManage
@@ -656,9 +693,14 @@ watch_capture(){
   ls "$GSHOTS"/shots/shot-*.png >/dev/null 2>&1 && GDIR="$GSHOTS/shots"
   [[ -z "$GDIR" ]] && ls "$GSHOTS"/shot-*.png >/dev/null 2>&1 && GDIR="$GSHOTS"
   if [[ -n "$GDIR" ]]; then
-    local gn; gn=$(ls "$GDIR"/shot-*.png 2>/dev/null | wc -l | tr -d ' ')
-    "$FFMPEG" -y -loglevel error -framerate 10 -pattern_type glob -i "$GDIR/shot-*.png" -vf "scale=trunc(iw/2)*2:trunc(ih/2)*2,format=yuv420p" "$OUT"
-    log_success "timelapse (live in-guest capture): $OUT ($gn frames)"
+    local gn intro_n; gn=$(ls "$GDIR"/shot-*.png 2>/dev/null | wc -l | tr -d ' ')
+    intro_n=$(encode_timelapse "$OUT" "$GDIR/shot-*.png")
+    link_latest latest-timelapse.mp4 "$OUT"
+    if [[ "$intro_n" -gt 0 ]]; then
+      log_success "timelapse (live in-guest capture + ${intro_n} install-phase frames): $OUT ($((gn+intro_n)) frames)"
+    else
+      log_success "timelapse (live in-guest capture): $OUT ($gn frames)"
+    fi
     return 0
   fi
   # Fallback: assemble from host screenshots (caption each from the manifest). May be frozen.
@@ -669,8 +711,9 @@ watch_capture(){
     "$FFMPEG" -y -loglevel error -i "$FRAMES/$f" -vf "drawtext=fontfile=${HFONT}:text='${safe}':x=10:y=h-34:fontsize=20:fontcolor=yellow:box=1:boxcolor=black@0.7" "$FRAMES/$f.a.png" 2>/dev/null || cp "$FRAMES/$f" "$FRAMES/$f.a.png"
     mv "$FRAMES/$f.a.png" "$FRAMES/$f"
   done < "$MAN"
-  "$FFMPEG" -y -loglevel error -framerate 10 -pattern_type glob -i "$FRAMES/frame-*.png" -vf "scale=trunc(iw/2)*2:trunc(ih/2)*2,format=yuv420p" "$OUT"
-  log_success "timelapse (host screenshots, fallback): $OUT ($n frames)"
+  local intro_n; intro_n=$(encode_timelapse "$OUT" "$FRAMES/frame-*.png")
+  link_latest latest-timelapse.mp4 "$OUT"
+  log_success "timelapse (host screenshots, fallback): $OUT ($((n+intro_n)) frames, incl. ${intro_n} install-phase)"
 }
 
 # Run host-side orchestration unless we are already inside the container.
@@ -678,7 +721,9 @@ if [[ -z "${VMBUILDER_INNER:-}" ]]; then
   mkdir -p "$HVID"
   HLOG="$HVID/build-vm-$(date +%Y%m%d-%H%M%S).log"
   exec > >(tee -a "$HLOG") 2>&1
-  log_info "Host transcript: $HLOG"
+  # Stable pointer to this run's log (the timelapse gets latest-timelapse.mp4 after assembly).
+  ln -sfn "$(basename "$HLOG")" "$HVID/latest.log" 2>/dev/null || true
+  log_info "Host transcript: $HLOG (also linked as .logs/latest.log)"
 
   if [[ -n "$EXPORT_ONLY" ]]; then
     docker inspect "$HC" >/dev/null 2>&1 || { log_error "container '$HC' not found - nothing to export."; exit 1; }
