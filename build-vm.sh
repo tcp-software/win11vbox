@@ -2263,12 +2263,15 @@ if defined MISSING (
 rem Clone repos LAST, AFTER the status is recorded. This validation step has hung the
 rem installer before the completion write, so it must never gate completion/export.
 echo ==== cloning repos %DATE% %TIME% ==== >> "%LOG%"
+rem skip_clone.do means "the repos are already present - skip the clone step" (independent of
+rem whether post_build runs). --stop-at tools stages it with NO post_build.do (toolchain only);
+rem an incremental re-run can stage it WITH post_build.do to advance a build phase without paying
+rem for a multi-GB re-clone. CLONEFAIL gates post_build so a failed clone never builds.
+set "CLONEFAIL="
 if exist "%~dp0skip_clone.do" (
-  rem --stop-at tools: stop after the toolchain, before cloning anything. Mark the build done so
-  rem the host watcher/exporter knows a tools-only run is finished (no clone, build, or servers).
-  echo ==== clone SKIPPED ^(--stop-at tools^) %DATE% %TIME% ==== >> "%LOG%"
-  >"D:\Tools\build_phase.txt" echo Stopped at tools ^(--stop-at^)
-  >"D:\Tools\build.done" echo tools
+  echo ==== clone SKIPPED ^(skip_clone.do; repos assumed present^) %DATE% %TIME% ==== >> "%LOG%"
+  if not exist D:\Work md D:\Work
+  if not exist D:\Work\clone_status.txt >"D:\Work\clone_status.txt" echo CLONE-OK
 ) else (
   rem Publish a phase label for the timelapse caption (capture_screens.ps1 reads build_phase.txt).
   >"D:\Tools\build_phase.txt" echo Cloning repositories...
@@ -2278,16 +2281,21 @@ if exist "%~dp0skip_clone.do" (
       echo ==== CLONE STAGE FAILED - working tree incomplete, build stage must not run %DATE% %TIME% ==== >> "%LOG%"
       if not exist D:\Work md D:\Work
       >"D:\Work\clone_status.txt" echo CLONE-FAILED
+      set "CLONEFAIL=1"
     ) else (
       echo ==== CLONE STAGE OK %DATE% %TIME% ==== >> "%LOG%"
       if not exist D:\Work md D:\Work
       >"D:\Work\clone_status.txt" echo CLONE-OK
-      rem Optional post-build chain (only if --post-build staged the marker), after a verified clone.
-      if exist "%~dp0post_build.do" if exist "%~dp0post_build.cmd" cmd /c "%~dp0post_build.cmd"
-      rem Mark the build finished. post_build writes this too; this also covers --stop-at clone
-      rem (post_build.do not staged), so the host watcher/exporter knows clone-only runs are done.
-      if not exist "%~dp0post_build.do" >"D:\Tools\build.done" echo clone
     )
+  )
+)
+rem Run post_build (if staged) after a non-failed clone/skip; otherwise mark the build done so the
+rem host watcher/exporter knows a clone-only or tools-only run is finished. ('tools' when the clone
+rem was skipped, 'clone' when it actually cloned.)
+if not defined CLONEFAIL (
+  if exist "%~dp0post_build.do" if exist "%~dp0post_build.cmd" cmd /c "%~dp0post_build.cmd"
+  if not exist "%~dp0post_build.do" (
+    if exist "%~dp0skip_clone.do" ( >"D:\Tools\build.done" echo tools ) else ( >"D:\Tools\build.done" echo clone )
   )
 )
 rem OVA hygiene: delete the plaintext credentials staged in C:\Setup so the exported
