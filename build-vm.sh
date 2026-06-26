@@ -2229,6 +2229,12 @@ if not defined TESTMODE (
   setx /M MSBUILD_PATH "C:\Program Files\Microsoft Visual Studio\18\Insiders\MSBuild\Current\Bin" >> "%LOG%" 2>&1
   setx /M NANT_BIN "D:\Work\tcp-we-thirdparty\Nant\0.92\bin" >> "%LOG%" 2>&1
   setx /M AWS_DEFAULT_REGION "us-east-1" >> "%LOG%" 2>&1
+  rem Put the version-switch helper select_we.sh on PATH: copy it to D:\scripts (the guide's
+  rem scripts dir) and add that dir to the machine PATH, so 'select_we.sh' runs by name from a
+  rem Cygwin shell. PowerShell appends to the MACHINE Path idempotently (no %PATH% bloat).
+  if not exist D:\scripts md D:\scripts
+  if exist "%~dp0select_we.sh" copy /y "%~dp0select_we.sh" D:\scripts\select_we.sh >> "%LOG%" 2>&1
+  powershell -NoProfile -Command "$p=[Environment]::GetEnvironmentVariable('Path','Machine'); if ($p -notmatch [regex]::Escape('D:\scripts')) { [Environment]::SetEnvironmentVariable('Path', ($p.TrimEnd(';') + ';D:\scripts'), 'Machine') }" >> "%LOG%" 2>&1
   rem Non-interactive credential config: AWS env vars + GitHub NuGet source (no-op if no creds staged).
   if exist "%~dp0configure_credentials.cmd" cmd /c "%~dp0configure_credentials.cmd"
 )
