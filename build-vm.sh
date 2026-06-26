@@ -39,6 +39,10 @@ GH_TOKEN="${GH_TOKEN:-}"
 RESUME=false
 CLEAN=false
 EXPORT_FILE=""
+# --stop-at: stop the build after a chosen stage (default 'all' = full pipeline). --servers:
+# which WebEdition servers to start (default 'all'). Both are validated by validate_build_opts.
+STOP_AT="all"
+SERVERS_SPEC="all"
 # cfg.zip (server config: TCPCONN.XML etc.) is pulled from ghcr so the post-build step is
 # fully automated - no manual download needed.
 CFG_REF="${CFG_REF:-ghcr.io/tcp-software/we-cfg:latest}"
@@ -48,6 +52,15 @@ CFG_REF="${CFG_REF:-ghcr.io/tcp-software/we-cfg:latest}"
 GH_USER="${GH_USER:-}"
 AWS_ACCESS_KEY="${AWS_ACCESS_KEY_ID:-}"
 AWS_SECRET_KEY="${AWS_SECRET_ACCESS_KEY:-}"
+
+# Ordered pipeline stages a build can stop AT (post-toolchain). 'all' is an alias for 'servers'
+# (the full run). 'clone' stops right after the toolchain + repo clone (post_build is skipped);
+# the rest are post_build phases. Used by both the host and the in-container parse.
+BUILD_STAGES="clone server client db cfg servers"
+# Echo the 0-based position of stage $1 in BUILD_STAGES, or -1 if unknown.
+stage_index(){ local i=0 s; for s in $BUILD_STAGES; do [[ "$s" == "$1" ]] && { echo "$i"; return; }; i=$((i+1)); done; echo -1; }
+# Validate a --servers spec (comma/space list of known server tokens). Returns nonzero on a bad token.
+valid_servers_spec(){ local t; for t in ${1//,/ }; do case "$t" in app|adm|admin|terminal|workstation|linclock|all) ;; *) return 1 ;; esac; done; return 0; }
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -133,6 +146,13 @@ OPTIONS
   --clean                Remove an existing VM of the same name (and any leftover VM files)
                          before building, instead of resuming it. Without it, an existing VM is
                          resumed, and leftover files abort creation with a clear message.
+  --stop-at STAGE        Stop the build after STAGE (default: all = full pipeline). Stages, in
+                         order: clone (toolchain + repo clone only), server, client, db (restore
+                         + SQL logins + nginx), cfg (per-server cfg + firewall), servers (start
+                         them = full run). Earlier stages start no servers.
+  --servers SPEC         Which WebEdition servers to start, comma-separated (default: all).
+                         Tokens: app, adm, terminal, workstation, linclock (=app+terminal), all.
+                         e.g. --servers app,terminal. The selection persists for the boot task.
   --headless             Start the VM headless (auto-selected when no X DISPLAY is present)
   --host-iocache on|off  Force VirtualBox host I/O cache (default: auto - on for
                          overlay/union/ZFS filesystems that can't do O_DIRECT)
@@ -528,17 +548,68 @@ for _a in "$@"; do
   case "$_pv" in
     --export)      EXPORT_DIR="$_a" ;;
     --export-only) EXPORT_DIR="$_a"; EXPORT_ONLY=1 ;;
+    --stop-at)     STOP_AT="$_a" ;;
+    --servers)     SERVERS_SPEC="$_a" ;;
   esac
   [[ "$_a" == "--watch" ]] && WATCH=true
   [[ "$_a" == "--dry-run" ]] && DRYRUN=true
   _pv="$_a"
 done
+# Normalize + validate the new options up front so a typo fails fast (before the container spins
+# up) - but only on a build run. --export-only ignores these flags entirely, so a stale value in
+# the user's shell history must not reject a pure re-export.
+WAIT_PORTS=""
+if [[ -z "$EXPORT_ONLY" ]]; then
+  # 'all' is the full pipeline; map it to its concrete final stage 'servers'. An empty/whitespace
+  # --servers means 'all' (matching start_servers.sh), so the host's readiness gate covers the
+  # same servers the guest actually starts rather than diverging to the no-servers path.
+  [[ "$STOP_AT" == "all" ]] && STOP_AT="servers"
+  [[ -z "${SERVERS_SPEC// /}" ]] && SERVERS_SPEC="all"
+  if [[ "$(stage_index "$STOP_AT")" == "-1" ]]; then
+    log_error "--stop-at: unknown stage '$STOP_AT'. Valid: ${BUILD_STAGES// /, }, all (default)."; exit 2
+  fi
+  valid_servers_spec "$SERVERS_SPEC" || { log_error "--servers: unknown token in '$SERVERS_SPEC'. Valid: app, adm, terminal, workstation, linclock, all (comma-separated)."; exit 2; }
+  # Ports the host should wait for (export gate + --watch stop). Only the SELECTED servers start,
+  # and only when the build runs through the 'servers' stage; an earlier --stop-at starts none.
+  if [[ "$STOP_AT" == "servers" ]]; then
+    for _t in ${SERVERS_SPEC//,/ }; do
+      case "$_t" in
+        app) WAIT_PORTS+=" 8008" ;; adm|admin) WAIT_PORTS+=" 8012" ;; terminal) WAIT_PORTS+=" 8010" ;;
+        workstation) WAIT_PORTS+=" 8014" ;; linclock) WAIT_PORTS+=" 8008 8010" ;;
+        all) WAIT_PORTS="8008 8010 8012 8014" ;;
+      esac
+    done
+    WAIT_PORTS="$(printf '%s\n' $WAIT_PORTS | sort -u | tr '\n' ' ' | sed 's/ *$//')"
+  fi
+  [[ "$STOP_AT" != "servers" ]] && log_info "--stop-at $STOP_AT: build will stop after that stage (servers not started)."
+  [[ "$STOP_AT" == "servers" && "$SERVERS_SPEC" != "all" ]] && log_info "--servers $SERVERS_SPEC: starting only [$WAIT_PORTS]."
+fi
 
 # VBoxManage inside the container (HOME=/root is where the VM is registered; full path because
 # a non-login exec has no PATH).
 gx(){ docker exec -e HOME=/root "$HC" /usr/bin/VBoxManage "$@"; }
 gst(){ gx guestcontrol "$HVM" --username dev --password dev run --exe 'C:\Windows\System32\cmd.exe' -- cmd.exe /c 'type D:\Tools\install_status.txt' 2>/dev/null | tr -d '\r' | grep -v WARNING | tail -1; }
 glg(){ gx guestcontrol "$HVM" --username dev --password dev run --exe 'C:\Windows\System32\cmd.exe' -- cmd.exe /c 'type D:\Tools\install_tools.log' 2>/dev/null | tr -d '\r' | grep -v '^WARNING:'; }
+# type a guest file if it exists (empty output if absent); $1 = Windows path.
+gcat(){ gx guestcontrol "$HVM" --username dev --password dev run --exe 'C:\Windows\System32\cmd.exe' -- cmd.exe /c "if exist $1 type $1" 2>/dev/null | tr -d '\r' | grep -v WARNING || true; }
+# Probe guest build readiness for the current --stop-at/--servers selection. Echoes one of:
+#   ready  - selected servers all LISTENING, or (no servers expected) D:\Tools\build.done present
+#   failed - guest reported CLONE-FAILED (build can't finish)
+#   wait   - not done yet
+# Shared by wait_for_ready (the --export gate) and watch_capture (the --watch stop) so the two
+# never drift, and so BOTH honor CLONE-FAILED and a subset/no-server selection.
+probe_build_ready(){
+  local ns ok p
+  case "$(gcat 'D:\Work\clone_status.txt')" in *CLONE-FAILED*) echo failed; return ;; esac
+  if [[ -z "$WAIT_PORTS" ]]; then
+    [[ -n "$(gcat 'D:\Tools\build.done')" ]] && { echo ready; return; }
+  else
+    ns="$(gx guestcontrol "$HVM" --username dev --password dev run --exe 'C:\Windows\System32\cmd.exe' -- cmd.exe /c 'netstat -ano -p tcp' 2>/dev/null | tr -d '\r' || true)"
+    ok=true; for p in $WAIT_PORTS; do printf '%s\n' "$ns" | grep -E ":$p\b" | grep -q LISTENING || ok=false; done
+    [[ "$ok" == true ]] && { echo ready; return; }
+  fi
+  echo wait
+}
 
 ensure_ffmpeg(){
   FFMPEG="$(command -v ffmpeg || true)"
@@ -582,29 +653,38 @@ do_export(){
 # (This is "everything is finally done": 8/8 alone is just the toolchain, written before the
 # clone/compile/server-start even run.)
 wait_for_ready(){
-  log_info "Waiting for the build to fully finish before export: clone -> compile -> all 4 servers listening."
+  local i
+  # A dry run installs nothing and starts no servers (and writes no build.done), so "done" simply
+  # means the dummy install loop reached 8/8. Without this, the port/build.done wait below would
+  # loop to the timeout and refuse to export a dry-run VM.
+  if [[ "$DRYRUN" == true ]]; then
+    log_info "Dry run: waiting for the install to reach 8/8 before export (no servers start)."
+    for i in $(seq 1 60); do
+      docker inspect -f '{{.State.Running}}' "$HC" 2>/dev/null | grep -q true || { log_error "container '$HC' stopped while waiting - not exporting."; return 1; }
+      case "$(gst || true)" in *"Setup complete"*) log_success "dry run reached 8/8 - ready to export."; return 0 ;; esac
+      sleep 30
+    done
+    log_error "dry run did not reach 8/8 in time - not exporting."; return 1
+  fi
+  if [[ -z "$WAIT_PORTS" ]]; then
+    log_info "Waiting for the build to finish before export (--stop-at $STOP_AT; no servers start)."
+  else
+    log_info "Waiting for the build to fully finish before export: clone -> compile -> servers listening ($WAIT_PORTS)."
+  fi
   log_info "(This runs well past 8/8 - it can take 1-2h more for the clone, server build, and startup.)"
-  local i cs ns clone_ok=false p ready
   # 420 min (~7h): the in-container VirtualBox apt-install, Windows install, the toolchain
   # (SQL + VS), and the serial clone can all run slow under host I/O contention (a 4h cap timed
   # out a healthy-but-slow run). Generous so a slow run still finishes and exports.
   for i in $(seq 1 420); do
     docker inspect -f '{{.State.Running}}' "$HC" 2>/dev/null | grep -q true || { log_error "container '$HC' stopped while waiting - not exporting."; return 1; }
-    if [[ "$clone_ok" != true ]]; then
-      cs="$(gx guestcontrol "$HVM" --username dev --password dev run --exe 'C:\Windows\System32\cmd.exe' -- cmd.exe /c 'type D:\Work\clone_status.txt' 2>/dev/null | tr -d '\r' | grep -v WARNING || true)"
-      case "$cs" in
-        *CLONE-OK*)     clone_ok=true; log_info "repos cloned + verified." ;;
-        *CLONE-FAILED*) log_error "in-guest clone FAILED - not exporting (fix the token/network, re-run)."; return 1 ;;
-      esac
-    fi
-    ns="$(gx guestcontrol "$HVM" --username dev --password dev run --exe 'C:\Windows\System32\cmd.exe' -- cmd.exe /c 'netstat -ano -p tcp' 2>/dev/null | tr -d '\r' || true)"
-    ready=true
-    for p in 8008 8010 8012 8014; do printf '%s\n' "$ns" | grep -E ":$p\b" | grep -q LISTENING || ready=false; done
-    if [[ "$ready" == true ]]; then log_success "all four servers are listening (8008/8010/8012/8014) - build complete."; return 0; fi
-    [[ $((i % 5)) -eq 0 ]] && log_info "still building... (clone_ok=$clone_ok, ~${i} min elapsed)"
+    case "$(probe_build_ready)" in
+      ready)  log_success "build ready (${WAIT_PORTS:-stopped per --stop-at $STOP_AT}) - exporting."; return 0 ;;
+      failed) log_error "in-guest clone FAILED - not exporting (fix the token/network, re-run)."; return 1 ;;
+    esac
+    [[ $((i % 5)) -eq 0 ]] && log_info "still building... (~${i} min elapsed)"
     sleep 60
   done
-  log_error "timed out (~7h) waiting for the servers to come up - not exporting; VM left running for inspection."
+  log_error "timed out (~7h) waiting for the build to finish - not exporting; VM left running for inspection."
   return 1
 }
 
@@ -648,7 +728,7 @@ link_latest(){ ln -sfn "$(basename "$2")" "$HVID/$1" 2>/dev/null || true; }
 # refreshed without a display front-end attached (the timelapse used to get stuck on the SQL
 # step). Host screenshots are still taken as a fallback in case the guest capture didn't run.
 watch_capture(){
-  local FRAMES="$HVID/frames" GSHOTS="$HVID/gshots" ts MAN OUT n=0 last="" idle=0 loglines=0 full total st rel f s safe post88=false ns ready p
+  local FRAMES="$HVID/frames" GSHOTS="$HVID/gshots" ts MAN OUT n=0 last="" idle=0 loglines=0 full total st rel f s safe post88=false ns ready p bd
   ts="$(date +%Y%m%d-%H%M%S)"; MAN="$HVID/.frames-${ts}.manifest"; OUT="$HVID/${ts}-timelapse.mp4"
   # Clear stale frames from a prior run so the glob doesn't mix two runs into one video.
   rm -rf "$FRAMES" "$GSHOTS"; mkdir -p "$FRAMES"; : > "$MAN"
@@ -664,16 +744,21 @@ watch_capture(){
       echo "$(printf 'frame-%05d.png' "$n")|${st:-(starting)}" >> "$MAN"; n=$((n+1))
     fi
     [[ -n "$st" && "$st" != "$last" ]] && { echo "[guest] $(date +%H:%M:%S) $st"; last="$st"; }
-    # Keep capturing past 8/8 through the post-build phases; stop once all four servers listen.
-    # A dry run does no clone/build and never starts servers, so stop at 8/8 instead of waiting.
+    # Keep capturing past 8/8 through the post-build phases; stop once the selected servers
+    # listen (or the build is marked done when no servers start). A dry run does no clone/build
+    # and never starts servers, so stop at 8/8 instead of waiting.
     case "$st" in *"Setup complete"*)
       if [[ "$DRYRUN" == true ]]; then echo "[guest] reached 8/8 (dry-run; no servers start) - capture complete"; break; fi
       [[ "$post88" != true ]] && echo "[guest] reached 8/8 - capturing through clone, build, and server startup..."; post88=true ;;
     esac
     if [[ "$post88" == true ]]; then
-      ns="$(gx guestcontrol "$HVM" --username dev --password dev run --exe 'C:\Windows\System32\cmd.exe' -- cmd.exe /c 'netstat -ano -p tcp' 2>/dev/null | tr -d '\r' || true)"
-      ready=true; for p in 8008 8010 8012 8014; do printf '%s\n' "$ns" | grep -E ":$p\b" | grep -q LISTENING || ready=false; done
-      [[ "$ready" == true ]] && { echo "[guest] all four servers listening (8008/8010/8012/8014) - capture complete"; break; }
+      # Same readiness probe the export gate uses: selected ports listening, or build.done when no
+      # servers start, and it also catches CLONE-FAILED so a failed clone-only run stops promptly
+      # instead of spinning to the idle cap.
+      case "$(probe_build_ready)" in
+        ready)  echo "[guest] build ready (${WAIT_PORTS:-stopped per --stop-at}) - capture complete"; break ;;
+        failed) echo "[guest] in-guest clone FAILED - stopping capture"; break ;;
+      esac
     fi
     case "$st" in *ERROR*) echo "[guest] installer reported ERROR - stopping capture"; break ;; esac
     docker inspect -f '{{.State.Running}}' "$HC" 2>/dev/null | grep -q true || { echo "[guest] container stopped"; break; }
@@ -756,6 +841,8 @@ while [[ $# -gt 0 ]]; do
     --nat) FORCE_NAT=true; shift ;;
     --dry-run) DRY_RUN=true; shift ;;
     --clean) CLEAN=true; shift ;;
+    --stop-at) STOP_AT="$2"; shift 2 ;;
+    --servers) SERVERS_SPEC="$2"; shift 2 ;;
     --headless) START_TYPE=headless; shift ;;
     --log-file) LOG_FILE="$2"; shift 2 ;;
     --host-iocache) HOST_IOCACHE="$2"; shift 2 ;;
@@ -1253,7 +1340,9 @@ cat > "${VM_DIR}/start_servers.sh" <<'EOF'
 # Start WebEdition runtime servers by DELEGATING to the repo's own canonical launchers in
 # server/Etc/Util (start-tcp{app,adm,hub,pwh}-server.sh). Those scripts know each server's
 # framework and run the built Tcp.<Name>.exe from bin\Debug, provisioning cfg as needed.
-#   Usage: start_servers.sh [app|adm|terminal|workstation|linclock|all]   (default: all)
+#   Usage: start_servers.sh [TOKEN ...]   where TOKEN in app|adm|terminal|workstation|linclock|all
+#     Accepts several tokens or a comma list, e.g. 'start_servers.sh app terminal' or 'app,terminal'.
+#     With no args it reads D:\Tools\servers.spec (written by the build / --servers), else 'all'.
 #     linclock = AppServerApi + TerminalHubApi (what a clock device needs)
 # IMPORTANT: only AppServerApi targets net10.0; AdmServerApi/TerminalHubApi/WorkstationHubApi
 # are .NET Framework 4.7.2 (OutputType=Exe). They are built by 'nant build' (VS MSBuild) -
@@ -1267,17 +1356,26 @@ export PATH="$PATH:/cygdrive/c/Program Files/dotnet"
 # AppServerApi (net10.0) lands in bin/Debug/<framework>; its launcher reads this.
 export APP_FRAMEWORK_VERSION="${APP_FRAMEWORK_VERSION:-net10.0}"
 
-sel="${1:-all}"
-declare -a SCRIPTS
-case "$sel" in
-  app)          SCRIPTS=(start-tcpapp-server.sh) ;;
-  adm|admin)    SCRIPTS=(start-tcpadm-server.sh) ;;
-  terminal)     SCRIPTS=(start-tcphub-server.sh) ;;
-  workstation)  SCRIPTS=(start-tcppwh-server.sh) ;;
-  linclock)     SCRIPTS=(start-tcpapp-server.sh start-tcphub-server.sh) ;;
-  all)          SCRIPTS=(start-tcpapp-server.sh start-tcpadm-server.sh start-tcphub-server.sh start-tcppwh-server.sh) ;;
-  *) echo "usage: start_servers.sh [app|adm|terminal|workstation|linclock|all]"; exit 1 ;;
-esac
+# Selection: explicit args (one or more tokens, or a comma list) win; else the persisted
+# D:\Tools\servers.spec (written by post_build from --servers; the boot task passes no arg); else 'all'.
+sel="$*"
+if [[ -z "$sel" && -f /cygdrive/d/Tools/servers.spec ]]; then sel="$(tr -d '\r\n' < /cygdrive/d/Tools/servers.spec)"; fi
+sel="${sel:-all}"
+declare -a SCRIPTS=()
+for tok in ${sel//,/ }; do
+  case "$tok" in
+    app)          SCRIPTS+=(start-tcpapp-server.sh) ;;
+    adm|admin)    SCRIPTS+=(start-tcpadm-server.sh) ;;
+    terminal)     SCRIPTS+=(start-tcphub-server.sh) ;;
+    workstation)  SCRIPTS+=(start-tcppwh-server.sh) ;;
+    linclock)     SCRIPTS+=(start-tcpapp-server.sh start-tcphub-server.sh) ;;
+    all)          SCRIPTS=(start-tcpapp-server.sh start-tcpadm-server.sh start-tcphub-server.sh start-tcppwh-server.sh) ;;
+    *) echo "usage: start_servers.sh [app|adm|terminal|workstation|linclock|all ...]  (tokens or a comma list)"; exit 1 ;;
+  esac
+done
+# De-dupe while preserving order (e.g. 'app linclock' would otherwise list AppServerApi twice).
+declare -a UNIQ=(); for s in "${SCRIPTS[@]}"; do case " ${UNIQ[*]} " in *" $s "*) ;; *) UNIQ+=("$s") ;; esac; done
+SCRIPTS=("${UNIQ[@]}")
 
 echo "Starting via repo launchers: ${SCRIPTS[*]}"
 for s in "${SCRIPTS[@]}"; do
@@ -1498,7 +1596,15 @@ set "BASH=D:\Tools\cygwin\bin\bash.exe"
 set "IFACE=D:\Work\tcp-we-71\server\Src\Interface"
 rem PHASE: a short label for the timelapse caption (capture_screens.ps1 reads build_phase.txt).
 set "PHASE=D:\Tools\build_phase.txt"
-echo ==== post_build %DATE% %TIME% ==== >> "%LOG%"
+rem --stop-at / --servers, from markers the orchestrator stages next to this script. STOPAT is
+rem the last phase to run (server|client|db|cfg|servers); 'servers' (default) is the full run.
+rem SRVSPEC is which servers to start (a comma list); written to D:\Tools\servers.spec so the
+rem boot task (and start_servers.sh) reads the same selection on every boot.
+set "STOPAT=servers"
+if exist "%HERE%post_build.stop" set /p STOPAT=<"%HERE%post_build.stop"
+set "SRVSPEC=all"
+if exist "%HERE%servers.spec" set /p SRVSPEC=<"%HERE%servers.spec"
+echo ==== post_build %DATE% %TIME% (stop-at=%STOPAT% servers=%SRVSPEC%) ==== >> "%LOG%"
 if not exist "!BASH!" ( echo post_build: Cygwin bash missing - cannot build >> "%LOG%" & endlocal & exit /b 1 )
 
 rem --- Apply server config from cfg.zip (extract to ...\Interface, then the guide's edits:
@@ -1522,9 +1628,11 @@ powershell -NoProfile -ExecutionPolicy Bypass -Command "Add-MpPreference -Exclus
 echo post_build: building server... >> "%LOG%"
 >"%PHASE%" echo Building server...
 "!BASH!" -lc "/cygdrive/c/Setup/build_server.sh" >> "%LOG%" 2>&1
+if /i "%STOPAT%"=="server" goto :stopped
 echo post_build: building client... >> "%LOG%"
 >"%PHASE%" echo Building client...
 "!BASH!" -lc "/cygdrive/c/Setup/build_client.sh" >> "%LOG%" 2>&1
+if /i "%STOPAT%"=="client" goto :stopped
 echo post_build: restoring test DB... >> "%LOG%"
 >"%PHASE%" echo Restoring test database...
 rem nant + sqlcmd + git must be on PATH for this inline step (the caller's PATH predates those
@@ -1537,6 +1645,7 @@ for /d %%v in ("C:\Program Files\Microsoft SQL Server\Client SDK\ODBC\*") do if 
 if defined SQLCMD ( if exist "%HERE%create_sql_logins.sql" "%SQLCMD%" -S localhost -E -i "%HERE%create_sql_logins.sql" >> "%LOG%" 2>&1 ) else ( echo post_build: sqlcmd not found - skipping SQL logins >> "%LOG%" )
 echo post_build: scaffolding nginx... >> "%LOG%"
 "!BASH!" -lc "/cygdrive/c/Setup/setup_nginx.sh" >> "%LOG%" 2>&1
+if /i "%STOPAT%"=="db" goto :stopped
 
 rem --- Give each server its OWN per-instance cfg dir, from the applied cfg (setup_server_cfg.sh) ---
 rem The repo launchers read each server's config from a PER-SERVER dir Src\Interface\<Server>\cfg
@@ -1560,20 +1669,34 @@ rem all four servers bind all interfaces (see setup_server_cfg.sh - ApiServerHos
 rem device can reach any of them directly. Idempotent (keyed by rule name).
 echo post_build: opening firewall for WebEdition ports (8008/8010/8012/8014)... >> "%LOG%"
 powershell -NoProfile -ExecutionPolicy Bypass -Command "if (-not (Get-NetFirewallRule -Name TCPWebEdition -ErrorAction SilentlyContinue)) { New-NetFirewallRule -Name TCPWebEdition -DisplayName 'TCP WebEdition servers' -Enabled True -Direction Inbound -Protocol TCP -Action Allow -LocalPort 8008,8010,8012,8014 }" >> "%LOG%" 2>&1
+if /i "%STOPAT%"=="cfg" goto :stopped
 
-rem --- Auto-start all WebEdition servers on EVERY boot (persistent) via a scheduled task
+rem --- Auto-start the SELECTED WebEdition servers on EVERY boot (persistent) via a scheduled task
 rem that runs at startup as dev. start_servers.sh backgrounds the servers and returns, and
 rem Task Scheduler does not kill the detached children, so they keep running. Then run it
 rem once now so the stack is up immediately after this build (no reboot needed). nginx is
 rem already a Windows service; SQL Server auto-starts; this brings up the 4 .NET servers.
-echo post_build: installing TCPStartServers boot task ^(all servers^)... >> "%LOG%"
-schtasks /create /tn TCPStartServers /tr "\"D:\Tools\cygwin\bin\bash.exe\" -lc /cygdrive/c/Setup/start_servers.sh all" /sc onstart /ru dev /rp dev /rl highest /f >> "%LOG%" 2>&1
-echo post_build: starting all servers now... >> "%LOG%"
+rem Persist the server selection where start_servers.sh reads it on every boot (D: survives in
+rem the OVA; the boot task passes no arg, so the script picks the selection up from this file).
+>"D:\Tools\servers.spec" echo %SRVSPEC%
+echo post_build: installing TCPStartServers boot task ^(servers: %SRVSPEC%^)... >> "%LOG%"
+schtasks /create /tn TCPStartServers /tr "\"D:\Tools\cygwin\bin\bash.exe\" -lc /cygdrive/c/Setup/start_servers.sh" /sc onstart /ru dev /rp dev /rl highest /f >> "%LOG%" 2>&1
+echo post_build: starting servers now ^(%SRVSPEC%^)... >> "%LOG%"
 >"%PHASE%" echo Starting WebEdition servers...
 schtasks /run /tn TCPStartServers >> "%LOG%" 2>&1
 
 >"%PHASE%" echo Servers started - waiting for ports
+>"D:\Tools\build.done" echo started %SRVSPEC%
 echo ==== post_build done %DATE% %TIME% ==== >> "%LOG%"
+endlocal
+exit /b 0
+
+rem --stop-at landed before 'servers': record the stopping point so the host watcher/exporter
+rem knows the build is finished even though no ports will ever come up, and tag the timelapse.
+:stopped
+>"%PHASE%" echo Stopped at %STOPAT% (--stop-at)
+>"D:\Tools\build.done" echo stopped %STOPAT%
+echo ==== post_build done (stopped at %STOPAT%) %DATE% %TIME% ==== >> "%LOG%"
 endlocal
 exit /b 0
 EOF
@@ -2127,6 +2250,9 @@ if exist "%~dp0clone_repos.cmd" (
     >"D:\Work\clone_status.txt" echo CLONE-OK
     rem Optional post-build chain (only if --post-build staged the marker), after a verified clone.
     if exist "%~dp0post_build.do" if exist "%~dp0post_build.cmd" cmd /c "%~dp0post_build.cmd"
+    rem Mark the build finished. post_build writes this too; this also covers --stop-at clone
+    rem (post_build.do not staged), so the host watcher/exporter knows clone-only runs are done.
+    if not exist "%~dp0post_build.do" >"D:\Tools\build.done" echo clone
   )
 )
 rem OVA hygiene: delete the plaintext credentials staged in C:\Setup so the exported
@@ -2336,13 +2462,16 @@ $uiTimer.Add_Tick({
       $idx = [array]::IndexOf($phaseOrder, $phase.Trim())
       if ($idx -ge 0) { $bar.Value = [math]::Min(100, [int]((($idx + 1) / $phaseOrder.Count) * 100)) }
       $step.Text = $phase
-      # Finalize once all four WebEdition servers are listening.
-      $allUp = $true
-      foreach ($p in 8008,8010,8012,8014) { if (-not (Get-NetTCPConnection -State Listen -LocalPort $p -ErrorAction SilentlyContinue)) { $allUp = $false; break } }
-      if ($allUp) {
+      # Finalize when the guest marks the build done (D:\Tools\build.done). post_build writes it
+      # for every outcome - full run, a --servers subset, or a --stop-at early stop - so the dialog
+      # finalizes regardless of which (or how many) servers were started, instead of waiting for
+      # all four ports that a subset/early-stop run will never bring up.
+      if (Test-Path 'D:\Tools\build.done') {
         $script:finished = $true
         $bar.Value = 100
-        $step.Text = 'All four servers running (8008 / 8010 / 8012 / 8014)'
+        $done = ''
+        try { $done = (Get-Content 'D:\Tools\build.done' -ErrorAction Stop | Select-Object -Last 1) } catch {}
+        $step.Text = if ($done -match 'stopped') { "Build complete - $done" } else { 'Build complete - servers started' }
         $step.ForeColor = [System.Drawing.Color]::DarkGreen
         $uiTimer.Stop()
         Show-Details (Get-Summary)
@@ -2459,12 +2588,12 @@ while ($n -lt $maxFrames) {
     $bmp.Dispose()
     $n++
   } catch {}
-  # Stop a few frames after all four WebEdition servers are listening, so the timelapse runs
-  # through (and briefly past) server startup even when the host isn't watching.
+  # Stop a few frames after the build is marked done (D:\Tools\build.done covers a full run, a
+  # --servers subset, and a --stop-at early stop), so the timelapse runs through (and briefly
+  # past) the final stage even when the host isn't watching. A subset/early-stop run never brings
+  # up all four ports, so keying off build.done - not a 4-port check - is what lets it finish.
   try {
-    $allUp = $true
-    foreach ($p in 8008,8010,8012,8014) { if (-not (Get-NetTCPConnection -State Listen -LocalPort $p -ErrorAction SilentlyContinue)) { $allUp = $false; break } }
-    if ($allUp) { $serverUpCount++ } else { $serverUpCount = 0 }
+    if (Test-Path 'D:\Tools\build.done') { $serverUpCount++ } else { $serverUpCount = 0 }
     if ($serverUpCount -ge 3) { break }
   } catch {}
   Start-Sleep -Seconds 20
@@ -2536,7 +2665,20 @@ EOF
   # Post-build runs by DEFAULT now (no flag): after a verified clone the guest builds
   # server+client, applies cfg.zip, restores the DB, creates SQL logins, and scaffolds
   # nginx. (install_tools.cmd only reaches it on a real run; --dry-run short-circuits first.)
-  : > "$STAGE_DIR/post_build.do"
+  # --stop-at controls how far it goes: 'clone' skips post_build entirely (stop after the
+  # toolchain + clone); otherwise post_build runs and reads post_build.stop to know which phase
+  # to stop after, and servers.spec to know which servers to start.
+  [[ "$STOP_AT" == "all" ]] && STOP_AT="servers"
+  [[ -z "${SERVERS_SPEC// /}" ]] && SERVERS_SPEC="all"
+  if [[ "$STOP_AT" == "clone" ]]; then
+    log_info "--stop-at clone: toolchain + repo clone only (post_build skipped; no build/servers)."
+  else
+    : > "$STAGE_DIR/post_build.do"
+    printf '%s' "$STOP_AT" > "$STAGE_DIR/post_build.stop"
+    printf '%s' "$SERVERS_SPEC" > "$STAGE_DIR/servers.spec"
+    [[ "$STOP_AT" != "servers" ]] && log_info "--stop-at $STOP_AT: post_build will stop after that phase (servers not started)."
+    [[ "$STOP_AT" == "servers" && "$SERVERS_SPEC" != "all" ]] && log_info "--servers $SERVERS_SPEC: only those servers will start on boot."
+  fi
   # Stage cfg.zip (server config) so post_build can apply it: prefer an explicit --cfg,
   # else the copy the orchestrator placed next to the ISO (from --cfg or the ghcr pull).
   CFG_SRC="${CFG_PATH:-$(dirname "$ISO_PATH")/cfg.zip}"
