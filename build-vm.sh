@@ -146,13 +146,38 @@ OPTIONS
   --clean                Remove an existing VM of the same name (and any leftover VM files)
                          before building, instead of resuming it. Without it, an existing VM is
                          resumed, and leftover files abort creation with a clear message.
-  --stop-at STAGE        Stop the build after STAGE (default: all = full pipeline). Stages, in
-                         order: clone (toolchain + repo clone only), server, client, db (restore
-                         + SQL logins + nginx), cfg (per-server cfg + firewall), servers (start
-                         them = full run). Earlier stages start no servers.
-  --servers SPEC         Which WebEdition servers to start, comma-separated (default: all).
-                         Tokens: app, adm, terminal, workstation, linclock (=app+terminal), all.
-                         e.g. --servers app,terminal. The selection persists for the boot task.
+  --stop-at STAGE        Stop the build after STAGE (default: all = full pipeline). Each stage
+                         includes all earlier ones; stopping before 'servers' starts none. Stages,
+                         in order:
+                           clone   - install the full toolchain and clone the repos to D:\Work,
+                                     then stop before any compile.
+                           server  - + compile the WebEdition server solution (nant build of
+                                     tcp-we-7.sln): the four .NET API servers and their deps.
+                                     AppServerApi is net10.0; the hubs/admin are .NET Framework
+                                     4.7.2 (built by VS MSBuild via nant, not 'dotnet build').
+                           client  - + build the browser client (npm): the manager/admin/webclock
+                                     web UI assets that nginx serves. Independent of 'server'.
+                           db      - + restore the Tcp70ProdTest test database (nant
+                                     __restore-db-prod-test), create the SQL logins, and install
+                                     nginx as a Windows service.
+                           cfg     - + write each server's per-instance cfg and open the firewall
+                                     ports. Servers are fully configured but NOT started.
+                           servers - + start the selected servers and install the boot task
+                                     (= the full run; this is the default).
+  --servers SPEC         Which WebEdition servers to start, comma-separated (default: all). The
+                         selection persists (D:\Tools\servers.spec) so the boot task starts the
+                         same set on every boot. Tokens (raw listen port in parens):
+                           app          - AppServerApi      :8008  employee/manager/webclock backend
+                           terminal     - TerminalHubApi    :8010  clock-device hub (linclock/POS
+                                          connect here; the device-facing port)
+                           adm          - AdmServerApi      :8012  admin backend
+                           workstation  - WorkstationHubApi :8014  workstation-attached terminals
+                           linclock     - app + terminal (8008 + 8010; what a clock device needs)
+                           all          - all four
+                         e.g. --servers app,terminal. All servers run as the local admin 'dev'
+                         with an ELEVATED token (the TCPStartServers task uses /rl highest), which
+                         is required because SQL Server grants sysadmin to BUILTIN\Administrators -
+                         a non-elevated dev hits "Login failed". They bind 0.0.0.0 (all interfaces).
   --headless             Start the VM headless (auto-selected when no X DISPLAY is present)
   --host-iocache on|off  Force VirtualBox host I/O cache (default: auto - on for
                          overlay/union/ZFS filesystems that can't do O_DIRECT)
