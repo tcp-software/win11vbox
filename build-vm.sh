@@ -1471,6 +1471,46 @@ echo ">>> Done. Restart the servers (elevated): C:\\Setup\\start_servers.sh all"
 EOF
 chmod +x "${VM_DIR}/select_we.sh"
 
+# Install the guide's convenience aliases (img-041) into the dev Cygwin home and hook .bashrc
+# to source them. Runs as a Cygwin login shell, so $HOME is /home/dev. Idempotent.
+cat > "${VM_DIR}/setup_bash_aliases.sh" <<'EOF'
+#!/bin/bash
+set -uo pipefail
+cat > "$HOME/.bash_aliases" <<'ALIASES'
+alias df='df -h'
+alias free='free -m'
+alias grep='grep --color=auto'
+alias ls='ls --group-directories-first --time-style=+"%d.%m.%Y %H:%M" --color=auto -F'
+alias l='ls -lh'
+alias la='ls -lha'
+alias auth='git blame -CCC --color-lines --color-by-age -- '
+alias ia='git add'
+alias ib='git branch'
+alias ic='git commit'
+alias ica='git commit --amend'
+alias idi='git diff'
+alias idic='git diff --cached'
+alias il='git log'
+alias io='git checkout'
+alias ipull='git pull --rebase'
+alias ir='git rebase'
+alias iri='git rebase -i'
+alias is='git status'
+alias isuir='git submodule update --init --recursive'
+alias popcomhard='git reset --hard HEAD^'
+alias popcomsoft='git reset HEAD^'
+
+alias make="make -j$(nproc)"
+alias wk='cd /cygdrive/d/Work'
+ALIASES
+# Source .bash_aliases from .bashrc. Cygwin's stock .bashrc only has a COMMENTED block, so match
+# an ACTIVE (uncommented) reference - a leading '#' before .bash_aliases means it's commented and
+# doesn't count. Append our own active source line when none is active. Idempotent.
+grep -qE '^[^#]*\.bash_aliases' "$HOME/.bashrc" 2>/dev/null || printf '\n# convenience aliases\n[ -f ~/.bash_aliases ] && . ~/.bash_aliases\n' >> "$HOME/.bashrc"
+echo "bash aliases installed to $HOME/.bash_aliases"
+EOF
+chmod +x "${VM_DIR}/setup_bash_aliases.sh"
+
 cat > "${VM_DIR}/post_install_setup.sh" <<'EOF'
 #!/bin/bash
 set -euo pipefail
@@ -1687,6 +1727,10 @@ rem and in post_build's ELEVATED context (so the files are accessible to the ele
 echo post_build: setting up per-server cfg dirs... >> "%LOG%"
 >"%PHASE%" echo Configuring per-server cfg...
 if exist "%~dp0setup_server_cfg.sh" ( "!BASH!" -lc "/cygdrive/c/Setup/setup_server_cfg.sh" >> "%LOG%" 2>&1 ) else ( echo post_build: setup_server_cfg.sh missing - skipping per-server cfg >> "%LOG%" )
+
+rem Install the dev user's convenience bash aliases (the guide's set) + hook .bashrc to source them.
+echo post_build: installing bash aliases for dev... >> "%LOG%"
+if exist "%~dp0setup_bash_aliases.sh" ( "!BASH!" -lc "/cygdrive/c/Setup/setup_bash_aliases.sh" >> "%LOG%" 2>&1 )
 
 rem --- Open inbound TCP for the WebEdition server ports so a clock device on a bridged network
 rem can reach them. Windows Firewall blocks inbound by default and the install only opens port 22
@@ -2680,7 +2724,7 @@ EOF
   STAGE_DIR=$(mktemp -d)
   for f in bypass_checks.reg post_install_setup.sh setup_env_vars.cmd setup_powershell.ps1 \
            setup_nuget_source.cmd configure_credentials.cmd create_sql_logins.sql run_sql_logins.cmd build_server.sh \
-           build_client.sh setup_server_cfg.sh start_servers.sh select_we.sh post_build.cmd clone_repos.sh clone_repos.cmd setup_cygwin_ssh.sh setup_nginx.sh firstlogon.cmd \
+           build_client.sh setup_server_cfg.sh start_servers.sh select_we.sh setup_bash_aliases.sh post_build.cmd clone_repos.sh clone_repos.cmd setup_cygwin_ssh.sh setup_nginx.sh firstlogon.cmd \
            install_cygwin.cmd install_tools.cmd show_progress.ps1 capture_screens.ps1 run_setup.cmd setup-x86_64.exe README.md; do
     [[ -f "${VM_DIR}/${f}" ]] && cp "${VM_DIR}/${f}" "$STAGE_DIR/"
   done
