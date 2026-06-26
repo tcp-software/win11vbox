@@ -89,7 +89,7 @@ is tee'd to `.logs/build-vm-<timestamp>.log`. After each run, `.logs/latest.log`
 | `--export-only DIR` | Skip the build; export the VM already in the running container into `DIR` |
 | `--dry-run` | Stage a marker so the in-guest tool install runs dummy steps (each sleeps a few seconds) to verify the whole flow in minutes; no credentials needed |
 | `--clean` | Remove an existing same-named VM (and leftover VM files) before building, instead of resuming it. Without it, an existing VM resumes and leftover files abort creation with a clear message telling you to pass `--clean` |
-| `--stop-at STAGE` | Stop the build after `STAGE` (default `all`). In order: `clone` (toolchain + repo clone only), `server`, `client`, `db` (DB restore + SQL logins + nginx), `cfg` (per-server cfg + firewall), `servers` (start them = full run). Stopping before `servers` starts none |
+| `--stop-at STAGE` | Stop the build after `STAGE` (default `all`). In order: `tools` (toolchain only, before any clone), `clone` (+ repo clone), `server`, `client`, `db` (DB restore + SQL logins + nginx), `cfg` (per-server cfg + firewall), `servers` (start them = full run). Stopping before `servers` starts none |
 | `--servers SPEC` | Which WebEdition servers to start, comma-separated (default `all`): `app`, `adm`, `terminal`, `workstation`, `linclock` (= `app`+`terminal`), `all`. e.g. `--servers app,terminal`. Persisted so the boot task starts the same set on every boot |
 | `--cpus N` | vCPUs. Default: host cores / 4 (minimum 1) |
 | `--memory MB` / `--vram MB` | Guest RAM / video RAM. Defaults: 8192 / 128 |

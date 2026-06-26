@@ -53,10 +53,11 @@ GH_USER="${GH_USER:-}"
 AWS_ACCESS_KEY="${AWS_ACCESS_KEY_ID:-}"
 AWS_SECRET_KEY="${AWS_SECRET_ACCESS_KEY:-}"
 
-# Ordered pipeline stages a build can stop AT (post-toolchain). 'all' is an alias for 'servers'
-# (the full run). 'clone' stops right after the toolchain + repo clone (post_build is skipped);
-# the rest are post_build phases. Used by both the host and the in-container parse.
-BUILD_STAGES="clone server client db cfg servers"
+# Ordered pipeline stages a build can stop AT. 'all' is an alias for 'servers' (the full run).
+# 'tools' stops right after the toolchain install, BEFORE the repo clone (the guest skips the
+# clone step). 'clone' stops after the toolchain + clone. Both skip post_build; the rest are
+# post_build phases. Used by both the host and the in-container parse.
+BUILD_STAGES="tools clone server client db cfg servers"
 # Echo the 0-based position of stage $1 in BUILD_STAGES, or -1 if unknown.
 stage_index(){ local i=0 s; for s in $BUILD_STAGES; do [[ "$s" == "$1" ]] && { echo "$i"; return; }; i=$((i+1)); done; echo -1; }
 # Validate a --servers spec (comma/space list of known server tokens). Returns nonzero on a bad token.
@@ -149,8 +150,9 @@ OPTIONS
   --stop-at STAGE        Stop the build after STAGE (default: all = full pipeline). Each stage
                          includes all earlier ones; stopping before 'servers' starts none. Stages,
                          in order:
-                           clone   - install the full toolchain and clone the repos to D:\Work,
-                                     then stop before any compile.
+                           tools   - install the full toolchain only, then stop BEFORE cloning
+                                     anything (the guest skips the clone step). D:\Work is empty.
+                           clone   - + clone the repos to D:\Work, then stop before any compile.
                            server  - + compile the WebEdition server solution (nant build of
                                      tcp-we-7.sln): the four .NET API servers and their deps.
                                      AppServerApi is net10.0; the hubs/admin are .NET Framework
@@ -2253,7 +2255,7 @@ echo ==== install_tools finished %DATE% %TIME% (missing:!MISSING!) ==== >> "%LOG
 if defined MISSING (
   >"%STATUS%" echo ERROR Some tools did not install:!MISSING! - click Retry
 ) else (
-  >"%STATUS%" echo 8/8 Setup complete - tools installed, repos cloned
+  if exist "%~dp0skip_clone.do" (>"%STATUS%" echo 8/8 Setup complete - tools installed ^(clone skipped^)) else (>"%STATUS%" echo 8/8 Setup complete - tools installed, repos cloned)
   schtasks /delete /tn TCPInstallTools /f >nul 2>&1
   schtasks /delete /tn TCPSetupWindow /f >nul 2>&1
   schtasks /delete /tn TCPCaptureScreens /f >nul 2>&1
@@ -2261,23 +2263,31 @@ if defined MISSING (
 rem Clone repos LAST, AFTER the status is recorded. This validation step has hung the
 rem installer before the completion write, so it must never gate completion/export.
 echo ==== cloning repos %DATE% %TIME% ==== >> "%LOG%"
-rem Publish a phase label for the timelapse caption (capture_screens.ps1 reads build_phase.txt).
->"D:\Tools\build_phase.txt" echo Cloning repositories...
-if exist "%~dp0clone_repos.cmd" (
-  cmd /c "%~dp0clone_repos.cmd" >> "%LOG%" 2>&1
-  if errorlevel 1 (
-    echo ==== CLONE STAGE FAILED - working tree incomplete, build stage must not run %DATE% %TIME% ==== >> "%LOG%"
-    if not exist D:\Work md D:\Work
-    >"D:\Work\clone_status.txt" echo CLONE-FAILED
-  ) else (
-    echo ==== CLONE STAGE OK %DATE% %TIME% ==== >> "%LOG%"
-    if not exist D:\Work md D:\Work
-    >"D:\Work\clone_status.txt" echo CLONE-OK
-    rem Optional post-build chain (only if --post-build staged the marker), after a verified clone.
-    if exist "%~dp0post_build.do" if exist "%~dp0post_build.cmd" cmd /c "%~dp0post_build.cmd"
-    rem Mark the build finished. post_build writes this too; this also covers --stop-at clone
-    rem (post_build.do not staged), so the host watcher/exporter knows clone-only runs are done.
-    if not exist "%~dp0post_build.do" >"D:\Tools\build.done" echo clone
+if exist "%~dp0skip_clone.do" (
+  rem --stop-at tools: stop after the toolchain, before cloning anything. Mark the build done so
+  rem the host watcher/exporter knows a tools-only run is finished (no clone, build, or servers).
+  echo ==== clone SKIPPED ^(--stop-at tools^) %DATE% %TIME% ==== >> "%LOG%"
+  >"D:\Tools\build_phase.txt" echo Stopped at tools ^(--stop-at^)
+  >"D:\Tools\build.done" echo tools
+) else (
+  rem Publish a phase label for the timelapse caption (capture_screens.ps1 reads build_phase.txt).
+  >"D:\Tools\build_phase.txt" echo Cloning repositories...
+  if exist "%~dp0clone_repos.cmd" (
+    cmd /c "%~dp0clone_repos.cmd" >> "%LOG%" 2>&1
+    if errorlevel 1 (
+      echo ==== CLONE STAGE FAILED - working tree incomplete, build stage must not run %DATE% %TIME% ==== >> "%LOG%"
+      if not exist D:\Work md D:\Work
+      >"D:\Work\clone_status.txt" echo CLONE-FAILED
+    ) else (
+      echo ==== CLONE STAGE OK %DATE% %TIME% ==== >> "%LOG%"
+      if not exist D:\Work md D:\Work
+      >"D:\Work\clone_status.txt" echo CLONE-OK
+      rem Optional post-build chain (only if --post-build staged the marker), after a verified clone.
+      if exist "%~dp0post_build.do" if exist "%~dp0post_build.cmd" cmd /c "%~dp0post_build.cmd"
+      rem Mark the build finished. post_build writes this too; this also covers --stop-at clone
+      rem (post_build.do not staged), so the host watcher/exporter knows clone-only runs are done.
+      if not exist "%~dp0post_build.do" >"D:\Tools\build.done" echo clone
+    )
   )
 )
 rem OVA hygiene: delete the plaintext credentials staged in C:\Setup so the exported
@@ -2695,8 +2705,15 @@ EOF
   # to stop after, and servers.spec to know which servers to start.
   [[ "$STOP_AT" == "all" ]] && STOP_AT="servers"
   [[ -z "${SERVERS_SPEC// /}" ]] && SERVERS_SPEC="all"
-  if [[ "$STOP_AT" == "clone" ]]; then
-    log_info "--stop-at clone: toolchain + repo clone only (post_build skipped; no build/servers)."
+  if [[ "$STOP_AT" == "tools" || "$STOP_AT" == "clone" ]]; then
+    # Neither stage runs post_build (no post_build.do staged). 'tools' also tells the guest to
+    # skip the clone step itself, via the skip_clone.do marker.
+    if [[ "$STOP_AT" == "tools" ]]; then
+      : > "$STAGE_DIR/skip_clone.do"
+      log_info "--stop-at tools: install the toolchain only (skip the repo clone, build, and servers)."
+    else
+      log_info "--stop-at clone: toolchain + repo clone only (post_build skipped; no build/servers)."
+    fi
   else
     : > "$STAGE_DIR/post_build.do"
     printf '%s' "$STOP_AT" > "$STAGE_DIR/post_build.stop"
