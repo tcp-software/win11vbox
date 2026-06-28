@@ -136,6 +136,13 @@ namespaces; the .NET Framework servers tolerate them), and clears read-only and 
 `cfg.zip` source can carry restrictive permissions that otherwise cause a startup
 `UnauthorizedAccessException`).
 
+**Developer shell:** the `dev` Cygwin user gets the guide's convenience config — a curated
+`~/.bashrc` (git-branch prompt colored by repo state, `dircolors`/`LESS`/history tweaks) and
+`~/.bash_aliases` (git shortcuts, `wk='cd /cygdrive/d/Work'`, `make -j$(nproc)`, etc.; the stock
+`.bashrc` is kept as `.bashrc.orig`). Two Windows Terminal profiles are added — **Cygwin** (set
+as the default profile) and **Cygwin as Admin** (elevated) — both launching the Cygwin login
+shell. The branch-switch helper `select_we.sh` is placed on the PATH (in `D:\scripts`).
+
 **Servers:** all four WebEdition servers start on every boot through a scheduled task
 (`TCPStartServers`), so the full stack is up after the build, after a reboot, and in an
 exported OVA. Server logs are written to `D:\Tools\serverlogs`.

@@ -1573,9 +1573,9 @@ EOF
 chmod +x "${VM_DIR}/setup_bash_config.sh"
 
 # Add the guide's two Windows Terminal profiles ("Cygwin" and "Cygwin as Admin", the latter
-# elevated) to the dev user's settings.json. Run as dev so LOCALAPPDATA resolves to dev's. Merges
-# into an existing settings.json (by GUID) or creates a minimal one WT layers over its defaults.
-# Both point at the Cygwin login bash; the admin profile sets "elevate": true.
+# elevated) to the dev user's settings.json and make "Cygwin" the default profile. Run as dev so
+# LOCALAPPDATA resolves to dev's. Merges into an existing settings.json (by GUID) or creates a
+# minimal one WT layers over its defaults. Both point at the Cygwin login bash; admin sets elevate.
 cat > "${VM_DIR}/setup_terminal_profiles.ps1" <<'EOF'
 $ErrorActionPreference = 'SilentlyContinue'
 $base = Join-Path $env:LOCALAPPDATA 'Packages\Microsoft.WindowsTerminal_8wekyb3d8bbwe\LocalState'
@@ -1599,6 +1599,8 @@ function Has-Guid($g) { foreach ($p in $list) { if ($p.guid -eq $g) { return $tr
 if (-not (Has-Guid $cygGuid)) { [void]$list.Add([pscustomobject]@{ guid = $cygGuid; name = 'Cygwin'; commandline = $cmd; icon = $icon; startingDirectory = '%USERPROFILE%' }) }
 if (-not (Has-Guid $admGuid)) { [void]$list.Add([pscustomobject]@{ guid = $admGuid; name = 'Cygwin as Admin'; commandline = $cmd; icon = $icon; elevate = $true; startingDirectory = '%USERPROFILE%' }) }
 $j.profiles.list = @($list)
+# Make Cygwin the default profile (overwrite any existing default).
+$j | Add-Member -NotePropertyName defaultProfile -NotePropertyValue $cygGuid -Force
 $json = $j | ConvertTo-Json -Depth 32
 [System.IO.File]::WriteAllText($f, $json, (New-Object System.Text.UTF8Encoding($false)))
 Write-Output ("terminal profiles written to " + $f)
