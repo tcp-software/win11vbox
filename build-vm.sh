@@ -526,8 +526,20 @@ run_host_orchestrator() {
       if [[ -n "$_adp" ]]; then inner_args+=(--bridge-adapter "$_adp"); log_info "Host build: bridged via auto-detected adapter '$_adp'."
       else inner_args+=(--nat); log_warn "No bridged adapter found; falling back to NAT."; fi
     fi
+    # The ISO remaster extracts the ~8 GB ISO and splits install.wim in $TMPDIR (default /tmp).
+    # On a host /tmp is often small (here / has ~11 GB), which runs out mid-split. Point TMPDIR at
+    # the roomy cache volume (the container has a large overlay /tmp, so this only matters on host).
+    # Use the cache volume's parent (writable by this user) - the cache dir itself may be root-owned
+    # from prior container builds. Fall back to default /tmp with a warning if it isn't writable.
+    local _hosttmp; _hosttmp="$(dirname "$CACHE_HOST_DIR")/win11-build-tmp"
+    if ! mkdir -p "$_hosttmp" 2>/dev/null || [[ ! -w "$_hosttmp" ]]; then
+      log_warn "Could not use $_hosttmp for temp; falling back to default \$TMPDIR (ensure /tmp has ~15 GB free)."
+      _hosttmp=""
+    else
+      log_info "Host build: remaster/temp dir -> $_hosttmp (avoids small /tmp)."
+    fi
     log_info "Running the build on the host: ./build-vm.sh $(printf '%q ' "${inner_args[@]}")"
-    VMBUILDER_INNER=1 LOGNAME="$(whoami)" USER="$(whoami)" \
+    VMBUILDER_INNER=1 LOGNAME="$(whoami)" USER="$(whoami)" TMPDIR="$_hosttmp" \
       GH_TOKEN="${GH_TOKEN:-}" GH_USER="${GH_USER:-}" \
       AWS_ACCESS_KEY_ID="${AWS_ACCESS_KEY:-}" AWS_SECRET_ACCESS_KEY="${AWS_SECRET_KEY:-}" \
       bash "$0" "${inner_args[@]}"
@@ -1153,7 +1165,11 @@ VBoxManage modifyvm "$VM_NAME" --firmware efi64
 VBoxManage modifynvram "$VM_NAME" inituefivarstore
 VBoxManage modifynvram "$VM_NAME" enrollmssignatures
 VBoxManage modifynvram "$VM_NAME" enrollorclpk
-VBoxManage modifyvm "$VM_NAME" --secure-boot on || true
+# Enable Secure Boot. The option moved between VirtualBox versions: older builds use
+# `modifyvm --secure-boot on`; 7.1.x uses `modifynvram secureboot --enable`. Try both.
+VBoxManage modifyvm "$VM_NAME" --secure-boot on 2>/dev/null \
+  || VBoxManage modifynvram "$VM_NAME" secureboot --enable 2>/dev/null \
+  || log_warn "Could not enable Secure Boot (continuing; Win11 install uses bypass_checks)."
 
 VARIANT="Standard"
 [[ "$DISK_TYPE" == "fixed" ]] && VARIANT="Fixed"
