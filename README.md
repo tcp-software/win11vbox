@@ -192,6 +192,23 @@ Export powers the VM off (the servers restart on the next boot), exports the VM 
 the container, and stream-copies it to the host folder. The OVA imports into any VirtualBox
 through File > Import Appliance.
 
+## Launching the VM (bridged, hardened)
+
+`build-vm.sh` builds the VM inside the container over **NAT** (the container has no bridged
+DHCP). To actually *run* the VM for device testing, use **`launch-vm.sh`** on the host (against
+a VM registered in the host's VirtualBox — e.g. imported from the OVA):
+
+```bash
+./launch-vm.sh                      # bridged (auto-detected adapter), L1D flush on, nested paging off
+./launch-vm.sh --adapter eth0       # pick the bridged host adapter explicitly
+./launch-vm.sh --vm Win11 --force   # power off a running/saved VM first, then re-launch
+```
+
+It sets the VM to **bridged** networking (adapter from `--adapter`, else the host's default-route
+interface — skipping `docker0`/`veth*`), no NAT, **`--l1d-flush-on-vm-entry on`**, and
+**`--nested-paging off`** (the disable-EPT + flush-L1D L1TF mitigation posture), then starts it.
+The VM must be powered off to apply these (pass `--force` to power it off first).
+
 ## Networking, Server Config, and Cache
 
 - **Networking:** the build runs inside the container, where bridged networking has no DHCP,
