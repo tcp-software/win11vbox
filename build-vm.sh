@@ -1471,9 +1471,10 @@ echo ">>> Done. Restart the servers (elevated): C:\\Setup\\start_servers.sh all"
 EOF
 chmod +x "${VM_DIR}/select_we.sh"
 
-# Install the guide's convenience aliases (img-041) into the dev Cygwin home and hook .bashrc
-# to source them. Runs as a Cygwin login shell, so $HOME is /home/dev. Idempotent.
-cat > "${VM_DIR}/setup_bash_aliases.sh" <<'EOF'
+# Install the guide's Cygwin bash config for the dev user: ~/.bash_aliases (img-041) and a curated
+# ~/.bashrc (git-branch prompt, colors, LESS/history tweaks; sources .bash_aliases). Runs as a
+# Cygwin login shell, so $HOME is /home/dev. Idempotent (backs the stock .bashrc up once).
+cat > "${VM_DIR}/setup_bash_config.sh" <<'EOF'
 #!/bin/bash
 set -uo pipefail
 cat > "$HOME/.bash_aliases" <<'ALIASES'
@@ -1496,6 +1497,7 @@ alias ipull='git pull --rebase'
 alias ir='git rebase'
 alias iri='git rebase -i'
 alias is='git status'
+alias ist='git stash'
 alias isuir='git submodule update --init --recursive'
 alias popcomhard='git reset --hard HEAD^'
 alias popcomsoft='git reset HEAD^'
@@ -1503,13 +1505,104 @@ alias popcomsoft='git reset HEAD^'
 alias make="make -j$(nproc)"
 alias wk='cd /cygdrive/d/Work'
 ALIASES
-# Source .bash_aliases from .bashrc. Cygwin's stock .bashrc only has a COMMENTED block, so match
-# an ACTIVE (uncommented) reference - a leading '#' before .bash_aliases means it's commented and
-# doesn't count. Append our own active source line when none is active. Idempotent.
-grep -qE '^[^#]*\.bash_aliases' "$HOME/.bashrc" 2>/dev/null || printf '\n# convenience aliases\n[ -f ~/.bash_aliases ] && . ~/.bash_aliases\n' >> "$HOME/.bashrc"
-echo "bash aliases installed to $HOME/.bash_aliases"
+# Back up the stock (heavily-commented) .bashrc once, then install the guide's curated version.
+[ -f "$HOME/.bashrc" ] && [ ! -f "$HOME/.bashrc.orig" ] && cp -f "$HOME/.bashrc" "$HOME/.bashrc.orig"
+cat > "$HOME/.bashrc" <<'BASHRC'
+# If not running interactively, don't do anything
+[[ "$-" != *i* ]] && return
+
+# Make bash append rather than overwrite the history on disk
+shopt -s histappend
+# check the window size after each command; update LINES and COLUMNS if needed.
+shopt -s checkwinsize
+
+# helper function for git branch in prompt
+git_branch() {
+  branch=$(git branch 2>/dev/null | grep '^*' | colrm 1 2)
+  if [ ! -z "$branch" ]; then
+    if [ -n "$(git status --porcelain)" ]; then
+      color="31"  # Red for changes
+    elif [ "$(git stash list)" ]; then
+      color="33"  # Yellow for stashed changes
+    else
+      color="32"  # Green for a clean state
+    fi
+    echo -e "\e[0;${color}m${branch}\e[0m"
+  fi
+}
+
+# Prompt with git branch
+#PS1="\u@\h \w \$(git_branch)\$ "
+# Color prompt with git branch
+#PS1="\[\e[1;34m\]\w\[\e[m\] \$(git_branch)\[\e[m\] \[\e[1;32m\]\$ \[\e[m\]\[\e[0m\] "
+# Color prompt with user
+#PS1="\[\e[1;36m\]\u\[\e[1;35m\] \[\e[1;34m\]\w\[\e[m\] \[\e[m\] \[\e[1;32m\]\$ \[\e[m\]\[\e[0m\] "
+# Color prompt with user and git branch
+#PS1="\[\e[1;36m\]\u\[\e[1;35m\] \[\e[1;34m\]\w\[\e[m\] \$(git_branch)\[\e[m\] \[\e[1;32m\]\$ \[\e[m\]\[\e[0m\] "
+# Color prompt without user or git branch
+PS1="\[\e[1;34m\]\w\[\e[m\] \[\e[m\] \[\e[1;32m\]\$ \[\e[m\]\[\e[0m\] "
+
+# set LS_COLORS
+eval "$(dircolors -b)"
+# grep colorization
+export GREP_COLORS="mt=1;33"
+# Default parameters for "less": -R ANSI colors, -i case-insensitive, -X keep text on exit, -F no pager if one screen
+export LESS="-R -i -X -F"
+# No double entries in the shell history.
+export HISTCONTROL="$HISTCONTROL erasedups:ignoreboth"
+# disable sending stats to Microsoft
+export DOTNET_CLI_TELEMETRY_OPTOUT=1
+
+# colored man pages
+export LESS_TERMCAP_mb=$(printf "\e[1;37m")
+export LESS_TERMCAP_md=$(printf "\e[1;37m")
+export LESS_TERMCAP_me=$(printf "\e[0m")
+export LESS_TERMCAP_se=$(printf "\e[0m")
+export LESS_TERMCAP_so=$(printf "\e[1;47;30m")
+export LESS_TERMCAP_ue=$(printf "\e[0m")
+export LESS_TERMCAP_us=$(printf "\e[0;36m")
+export GROFF_NO_SGR=1
+
+# source the aliases
+if [ -f ~/.bash_aliases ]; then
+  . ~/.bash_aliases
+fi
+BASHRC
+echo "bash config installed: $HOME/.bashrc (+ .bash_aliases; stock backed up to .bashrc.orig)"
 EOF
-chmod +x "${VM_DIR}/setup_bash_aliases.sh"
+chmod +x "${VM_DIR}/setup_bash_config.sh"
+
+# Add the guide's two Windows Terminal profiles ("Cygwin" and "Cygwin as Admin", the latter
+# elevated) to the dev user's settings.json. Run as dev so LOCALAPPDATA resolves to dev's. Merges
+# into an existing settings.json (by GUID) or creates a minimal one WT layers over its defaults.
+# Both point at the Cygwin login bash; the admin profile sets "elevate": true.
+cat > "${VM_DIR}/setup_terminal_profiles.ps1" <<'EOF'
+$ErrorActionPreference = 'SilentlyContinue'
+$base = Join-Path $env:LOCALAPPDATA 'Packages\Microsoft.WindowsTerminal_8wekyb3d8bbwe\LocalState'
+New-Item -ItemType Directory -Force -Path $base | Out-Null
+$f = Join-Path $base 'settings.json'
+$cygGuid = '{c1c1c1c1-0000-0000-0000-000000000001}'
+$admGuid = '{c1c1c1c1-0000-0000-0000-000000000002}'
+$cmd  = 'D:\Tools\cygwin\bin\bash.exe -i -l'
+$icon = 'D:\Tools\cygwin\Cygwin.ico'
+$j = $null
+if (Test-Path $f) { try { $j = Get-Content $f -Raw | ConvertFrom-Json } catch { $j = $null } }
+if (-not $j) {
+  $j = [pscustomobject]@{ '$schema' = 'https://aka.ms/terminal-profiles-schema'; defaultProfile = $cygGuid; profiles = [pscustomobject]@{ list = @() } }
+}
+# Normalize: profiles may be an array (old schema) or an object with a .list array.
+if ($j.profiles -is [System.Array]) { $j.profiles = [pscustomobject]@{ list = @($j.profiles) } }
+if (-not $j.profiles) { $j | Add-Member profiles ([pscustomobject]@{ list = @() }) -Force }
+if (-not ($j.profiles.PSObject.Properties.Name -contains 'list')) { $j.profiles | Add-Member list @() -Force }
+$list = [System.Collections.ArrayList]@($j.profiles.list)
+function Has-Guid($g) { foreach ($p in $list) { if ($p.guid -eq $g) { return $true } } return $false }
+if (-not (Has-Guid $cygGuid)) { [void]$list.Add([pscustomobject]@{ guid = $cygGuid; name = 'Cygwin'; commandline = $cmd; icon = $icon; startingDirectory = '%USERPROFILE%' }) }
+if (-not (Has-Guid $admGuid)) { [void]$list.Add([pscustomobject]@{ guid = $admGuid; name = 'Cygwin as Admin'; commandline = $cmd; icon = $icon; elevate = $true; startingDirectory = '%USERPROFILE%' }) }
+$j.profiles.list = @($list)
+$json = $j | ConvertTo-Json -Depth 32
+[System.IO.File]::WriteAllText($f, $json, (New-Object System.Text.UTF8Encoding($false)))
+Write-Output ("terminal profiles written to " + $f)
+EOF
 
 cat > "${VM_DIR}/post_install_setup.sh" <<'EOF'
 #!/bin/bash
@@ -1728,9 +1821,12 @@ echo post_build: setting up per-server cfg dirs... >> "%LOG%"
 >"%PHASE%" echo Configuring per-server cfg...
 if exist "%~dp0setup_server_cfg.sh" ( "!BASH!" -lc "/cygdrive/c/Setup/setup_server_cfg.sh" >> "%LOG%" 2>&1 ) else ( echo post_build: setup_server_cfg.sh missing - skipping per-server cfg >> "%LOG%" )
 
-rem Install the dev user's convenience bash aliases (the guide's set) + hook .bashrc to source them.
-echo post_build: installing bash aliases for dev... >> "%LOG%"
-if exist "%~dp0setup_bash_aliases.sh" ( "!BASH!" -lc "/cygdrive/c/Setup/setup_bash_aliases.sh" >> "%LOG%" 2>&1 )
+rem Install the dev user's Cygwin bash config (curated .bashrc + the guide's .bash_aliases).
+echo post_build: installing bash config for dev... >> "%LOG%"
+if exist "%~dp0setup_bash_config.sh" ( "!BASH!" -lc "/cygdrive/c/Setup/setup_bash_config.sh" >> "%LOG%" 2>&1 )
+rem Add the two Windows Terminal Cygwin profiles to dev's settings.json (runs as dev for LOCALAPPDATA).
+echo post_build: adding Windows Terminal Cygwin profiles... >> "%LOG%"
+if exist "%~dp0setup_terminal_profiles.ps1" ( powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0setup_terminal_profiles.ps1" >> "%LOG%" 2>&1 )
 
 rem --- Open inbound TCP for the WebEdition server ports so a clock device on a bridged network
 rem can reach them. Windows Firewall blocks inbound by default and the install only opens port 22
@@ -2724,7 +2820,7 @@ EOF
   STAGE_DIR=$(mktemp -d)
   for f in bypass_checks.reg post_install_setup.sh setup_env_vars.cmd setup_powershell.ps1 \
            setup_nuget_source.cmd configure_credentials.cmd create_sql_logins.sql run_sql_logins.cmd build_server.sh \
-           build_client.sh setup_server_cfg.sh start_servers.sh select_we.sh setup_bash_aliases.sh post_build.cmd clone_repos.sh clone_repos.cmd setup_cygwin_ssh.sh setup_nginx.sh firstlogon.cmd \
+           build_client.sh setup_server_cfg.sh start_servers.sh select_we.sh setup_bash_config.sh setup_terminal_profiles.ps1 post_build.cmd clone_repos.sh clone_repos.cmd setup_cygwin_ssh.sh setup_nginx.sh firstlogon.cmd \
            install_cygwin.cmd install_tools.cmd show_progress.ps1 capture_screens.ps1 run_setup.cmd setup-x86_64.exe README.md; do
     [[ -f "${VM_DIR}/${f}" ]] && cp "${VM_DIR}/${f}" "$STAGE_DIR/"
   done
