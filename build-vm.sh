@@ -144,6 +144,12 @@ OPTIONS
   --dry-run              Stage a marker so the in-guest tool install runs DUMMY steps (each
                          sleeps ~3s) - verifies the whole flow in minutes, no credentials
                          needed. (Formerly --test.)
+  --no-container         Build directly on this host's VirtualBox instead of inside the vmbuilder
+                         container (alias: --host-build). The host must have VirtualBox + the
+                         ISO-remaster tools. Defaults to BRIDGED networking (the host has real
+                         DHCP, unlike the container) so the VM is device-reachable; pass --nat or
+                         --bridge-adapter NAME to override. The VM lands in VirtualBox's default
+                         machine folder. Pair with a fresh --vm-name to avoid clobbering an existing VM.
   --clean                Remove an existing VM of the same name (and any leftover VM files)
                          before building, instead of resuming it. Without it, an existing VM is
                          resumed, and leftover files abort creation with a clear message.
@@ -474,7 +480,7 @@ run_host_orchestrator() {
   fi
 
   ensure_host_vboxdrv
-  ensure_docker
+  [[ "$NO_CONTAINER" == true ]] || ensure_docker
   ensure_oras
   ghcr_login
   oras_pull_iso
@@ -491,6 +497,43 @@ run_host_orchestrator() {
   # An explicit --iso on the command line overrides the oras-fetched ISO.
   local a prev=""
   for a in "$@"; do [[ "$prev" == "--iso" ]] && HOST_ISO_PATH="$a"; prev="$a"; done
+
+  # --no-container: build directly on the host instead of inside the vmbuilder container. Same
+  # inner build path, just with host paths and host VirtualBox, and bridged by default (the host
+  # has real DHCP, unlike the container). No docker pull / run / exec.
+  if [[ "$NO_CONTAINER" == true ]]; then
+    log_info "Host build (--no-container): using host VirtualBox; VM in the default machine folder."
+    local repo_dir; repo_dir=$(cd "$(dirname "$0")" && pwd)
+    local inner_args=(); prev=""
+    for a in "$@"; do
+      if [[ "$prev" == "--iso" || "$prev" == "--cfg" || "$prev" == "--export" || "$prev" == "--export-only" ]]; then prev=""; continue; fi
+      case "$a" in
+        --iso|--cfg|--export|--export-only) prev="$a"; continue ;;   # flag + value: re-added / host-side
+        --watch|--no-container|--host-build) continue ;;             # host-side / not inner flags
+      esac
+      inner_args+=("$a"); prev=""
+    done
+    inner_args+=(--iso "$HOST_ISO_PATH" --cache-dir "$CACHE_DIR")
+    # Networking: the host has real bridged DHCP, so default to bridged (device-reachable) unless
+    # the caller chose --nat / --bridge-adapter. Prefer the default-route interface; skip docker/veth.
+    local _net_specified=false
+    for a in "$@"; do [[ "$a" == "--nat" || "$a" == "--bridge-adapter" ]] && _net_specified=true; done
+    if [[ "$_net_specified" == false ]]; then
+      local _routeif _adp=""
+      _routeif="$(ip route 2>/dev/null | awk '/^default/{print $5; exit}')"
+      while IFS= read -r _n; do [[ "$_n" == "$_routeif" ]] && { _adp="$_n"; break; }; done < <(VBoxManage list bridgedifs 2>/dev/null | sed -n 's/^Name: *//p')
+      [[ -z "$_adp" ]] && _adp="$(VBoxManage list bridgedifs 2>/dev/null | sed -n 's/^Name: *//p' | grep -vE '^(docker|veth|virbr)' | head -1)"
+      if [[ -n "$_adp" ]]; then inner_args+=(--bridge-adapter "$_adp"); log_info "Host build: bridged via auto-detected adapter '$_adp'."
+      else inner_args+=(--nat); log_warn "No bridged adapter found; falling back to NAT."; fi
+    fi
+    log_info "Running the build on the host: ./build-vm.sh $(printf '%q ' "${inner_args[@]}")"
+    VMBUILDER_INNER=1 LOGNAME="$(whoami)" USER="$(whoami)" \
+      GH_TOKEN="${GH_TOKEN:-}" GH_USER="${GH_USER:-}" \
+      AWS_ACCESS_KEY_ID="${AWS_ACCESS_KEY:-}" AWS_SECRET_ACCESS_KEY="${AWS_SECRET_KEY:-}" \
+      bash "$0" "${inner_args[@]}"
+    return $?
+  fi
+
   log_info "Pulling container image: $VMBUILDER_IMAGE"
   # Refresh the image, but DON'T abort on a pull failure (transient DNS/registry, or
   # offline) when a local copy already exists - fall back to it so the build is resilient.
@@ -570,7 +613,7 @@ HINTRO="$HREPO/assets/timelapse-install-frames"
 # container) find exits non-zero, pipefail propagates it, and the bare assignment would make
 # set -e kill the whole script here - silently, before ensure_virtualbox even runs.
 HFONT="$(find /usr/share/fonts -name 'DejaVuSans.ttf' 2>/dev/null | head -1 || true)"
-WATCH=false; EXPORT_DIR=""; EXPORT_ONLY=""; DRYRUN=false; _pv=""
+WATCH=false; EXPORT_DIR=""; EXPORT_ONLY=""; DRYRUN=false; NO_CONTAINER=false; _pv=""
 for _a in "$@"; do
   case "$_pv" in
     --export)      EXPORT_DIR="$_a" ;;
@@ -580,6 +623,7 @@ for _a in "$@"; do
   esac
   [[ "$_a" == "--watch" ]] && WATCH=true
   [[ "$_a" == "--dry-run" ]] && DRYRUN=true
+  [[ "$_a" == "--no-container" || "$_a" == "--host-build" ]] && NO_CONTAINER=true
   _pv="$_a"
 done
 # Normalize + validate the new options up front so a typo fails fast (before the container spins
@@ -612,9 +656,18 @@ if [[ -z "$EXPORT_ONLY" ]]; then
   [[ "$STOP_AT" == "servers" && "$SERVERS_SPEC" != "all" ]] && log_info "--servers $SERVERS_SPEC: starting only [$WAIT_PORTS]."
 fi
 
-# VBoxManage inside the container (HOME=/root is where the VM is registered; full path because
-# a non-login exec has no PATH).
-gx(){ docker exec -e HOME=/root "$HC" /usr/bin/VBoxManage "$@"; }
+# VBoxManage wrapper used by the host-side helpers (gst/glg, wait_for_ready, watch_capture,
+# do_export). With --no-container it's the host's VBoxManage directly; otherwise it runs inside
+# the vmbuilder container (HOME=/root is where the container's VM is registered; full path
+# because a non-login exec has no PATH).
+if [[ "$NO_CONTAINER" == true ]]; then
+  gx(){ VBoxManage "$@"; }
+  # In host mode the "is the build infra alive?" check is just "is the VM still registered?".
+  infra_alive(){ VBoxManage showvminfo "$HVM" >/dev/null 2>&1; }
+else
+  gx(){ docker exec -e HOME=/root "$HC" /usr/bin/VBoxManage "$@"; }
+  infra_alive(){ docker inspect -f '{{.State.Running}}' "$HC" 2>/dev/null | grep -q true; }
+fi
 gst(){ gx guestcontrol "$HVM" --username dev --password dev run --exe 'C:\Windows\System32\cmd.exe' -- cmd.exe /c 'type D:\Tools\install_status.txt' 2>/dev/null | tr -d '\r' | grep -v WARNING | tail -1; }
 glg(){ gx guestcontrol "$HVM" --username dev --password dev run --exe 'C:\Windows\System32\cmd.exe' -- cmd.exe /c 'type D:\Tools\install_tools.log' 2>/dev/null | tr -d '\r' | grep -v '^WARNING:'; }
 # type a guest file if it exists (empty output if absent); $1 = Windows path.
@@ -663,6 +716,14 @@ do_export(){
   for _ in $(seq 1 40); do [[ "$(gx showvminfo "$HVM" --machinereadable 2>/dev/null | sed -n 's/^VMState=//p' | tr -d '"')" == poweroff ]] && break; sleep 6; done
   gx controlvm "$HVM" poweroff >/dev/null 2>&1 || true; sleep 6
   log_info "Exporting (large; a few minutes)..."
+  if [[ "$NO_CONTAINER" == true ]]; then
+    # Host build: VBoxManage is local, so export straight into the host folder - no copy dance.
+    mkdir -p "$EXPORT_DIR"
+    gx export "$HVM" -o "$EXPORT_DIR/$OVA" --vsys 0 --product "TCP Win11 Dev VM ($ts)" || { log_error "export failed"; return 1; }
+    chmod 644 "$EXPORT_DIR/$OVA" 2>/dev/null || true
+    log_success "OVA: $EXPORT_DIR/$OVA ($(du -h "$EXPORT_DIR/$OVA" 2>/dev/null | cut -f1))"
+    return 0
+  fi
   gx export "$HVM" -o "$OVERLAY" --vsys 0 --product "TCP Win11 Dev VM ($ts)" || { log_error "export failed"; return 1; }
   docker rm -f ova_dest >/dev/null 2>&1 || true
   docker run -d --name ova_dest -v "$EXPORT_DIR":/out "$VMBUILDER_IMAGE" sleep infinity >/dev/null
@@ -687,7 +748,7 @@ wait_for_ready(){
   if [[ "$DRYRUN" == true ]]; then
     log_info "Dry run: waiting for the install to reach 8/8 before export (no servers start)."
     for i in $(seq 1 60); do
-      docker inspect -f '{{.State.Running}}' "$HC" 2>/dev/null | grep -q true || { log_error "container '$HC' stopped while waiting - not exporting."; return 1; }
+      infra_alive || { log_error "build infra gone while waiting (container stopped / VM unregistered) - not exporting."; return 1; }
       case "$(gst || true)" in *"Setup complete"*) log_success "dry run reached 8/8 - ready to export."; return 0 ;; esac
       sleep 30
     done
@@ -703,7 +764,7 @@ wait_for_ready(){
   # (SQL + VS), and the serial clone can all run slow under host I/O contention (a 4h cap timed
   # out a healthy-but-slow run). Generous so a slow run still finishes and exports.
   for i in $(seq 1 420); do
-    docker inspect -f '{{.State.Running}}' "$HC" 2>/dev/null | grep -q true || { log_error "container '$HC' stopped while waiting - not exporting."; return 1; }
+    infra_alive || { log_error "build infra gone while waiting (container stopped / VM unregistered) - not exporting."; return 1; }
     case "$(probe_build_ready)" in
       ready)  log_success "build ready (${WAIT_PORTS:-stopped per --stop-at $STOP_AT}) - exporting."; return 0 ;;
       failed) log_error "in-guest clone FAILED - not exporting (fix the token/network, re-run)."; return 1 ;;
@@ -759,7 +820,7 @@ watch_capture(){
   ts="$(date +%Y%m%d-%H%M%S)"; MAN="$HVID/.frames-${ts}.manifest"; OUT="$HVID/${ts}-timelapse.mp4"
   # Clear stale frames from a prior run so the glob doesn't mix two runs into one video.
   rm -rf "$FRAMES" "$GSHOTS"; mkdir -p "$FRAMES"; : > "$MAN"
-  docker inspect "$HC" >/dev/null 2>&1 || { log_warn "no '$HC' container to watch."; return 0; }
+  infra_alive || { log_warn "build infra not available to watch (no container / VM)."; return 0; }
   log_info "Following the in-guest install (frames captured inside the guest; live [guest]/[log] below)..."
   while true; do
     st="$(gst || true)"
@@ -788,17 +849,23 @@ watch_capture(){
       esac
     fi
     case "$st" in *ERROR*) echo "[guest] installer reported ERROR - stopping capture"; break ;; esac
-    docker inspect -f '{{.State.Running}}' "$HC" 2>/dev/null | grep -q true || { echo "[guest] container stopped"; break; }
+    infra_alive || { echo "[guest] build infra gone (container stopped / VM unregistered)"; break; }
     idle=$((idle+1)); [[ $idle -ge 600 ]] && { echo "[guest] ~5h cap reached - stopping capture"; break; }
     sleep 30
   done
   # Tell the in-guest capture to stop, then pull its frames (live desktop, already captioned).
   gx guestcontrol "$HVM" --username dev --password dev run --exe 'C:\Windows\System32\cmd.exe' -- cmd.exe /c "echo stop> D:\\Tools\\capture.stop" >/dev/null 2>&1 || true
   mkdir -p "$GSHOTS"
-  gx guestcontrol "$HVM" --username dev --password dev copyfrom --recursive --target-directory /work/win11vbox/.logs/gshots "D:\\Tools\\shots" >/dev/null 2>&1 || true
-  # Frames are written by the container as root; chown via the container (no host sudo prompt).
-  docker exec "$HC" chown -R "$(id -u):$(id -g)" /work/win11vbox/.logs 2>/dev/null \
-    || sudo -n chown -R "$(id -u):$(id -g)" "$HVID" 2>/dev/null || true
+  # copyfrom target: host mode pulls straight to the host .logs; container mode pulls to the
+  # container's mount of it (/work/win11vbox/.logs), which is the same host directory.
+  if [[ "$NO_CONTAINER" == true ]]; then
+    gx guestcontrol "$HVM" --username dev --password dev copyfrom --recursive --target-directory "$GSHOTS" "D:\\Tools\\shots" >/dev/null 2>&1 || true
+  else
+    gx guestcontrol "$HVM" --username dev --password dev copyfrom --recursive --target-directory /work/win11vbox/.logs/gshots "D:\\Tools\\shots" >/dev/null 2>&1 || true
+    # Frames are written by the container as root; chown via the container (no host sudo prompt).
+    docker exec "$HC" chown -R "$(id -u):$(id -g)" /work/win11vbox/.logs 2>/dev/null \
+      || sudo -n chown -R "$(id -u):$(id -g)" "$HVID" 2>/dev/null || true
+  fi
   if [[ -z "${FFMPEG:-}" ]]; then log_warn "ffmpeg unavailable - frames saved under $HVID, no video."; return 0; fi
   # Prefer the guest's live captures (already captioned in-guest, never frozen).
   local GDIR=""
@@ -838,8 +905,10 @@ if [[ -z "${VMBUILDER_INNER:-}" ]]; then
   log_info "Host transcript: $HLOG (also linked as .logs/latest.log)"
 
   if [[ -n "$EXPORT_ONLY" ]]; then
-    docker inspect "$HC" >/dev/null 2>&1 || { log_error "container '$HC' not found - nothing to export."; exit 1; }
-    gx showvminfo "$HVM" >/dev/null 2>&1 || { log_error "VM '$HVM' not registered in '$HC'."; exit 1; }
+    if [[ "$NO_CONTAINER" != true ]]; then
+      docker inspect "$HC" >/dev/null 2>&1 || { log_error "container '$HC' not found - nothing to export."; exit 1; }
+    fi
+    gx showvminfo "$HVM" >/dev/null 2>&1 || { log_error "VM '$HVM' not registered (host build: on this host; container build: in '$HC')."; exit 1; }
     do_export; exit $?
   fi
 
@@ -883,6 +952,7 @@ while [[ $# -gt 0 ]]; do
     --base-folder) BASE_FOLDER="$2"; shift 2 ;;
     --skip-install) SKIP_INSTALL=true; shift ;;
     --unattended) UNATTENDED=true; shift ;;
+    --no-container|--host-build) shift ;;   # host-side flag; ignored inside the build path
     --cache-dir) CACHE_DIR="$2"; shift 2 ;;
     --help|-h) print_help; exit 0 ;;
     *) log_error "Unknown option: $1"; usage ;;

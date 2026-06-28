@@ -45,6 +45,18 @@ done
 
 command -v VBoxManage >/dev/null 2>&1 || { echo "ERROR: VBoxManage not found on PATH (install VirtualBox on this host)." >&2; exit 1; }
 
+# modifyvm, retrying past the brief "already locked / being unlocked" window that follows a
+# poweroff (the session lock lingers a moment after the VM state reports poweroff).
+modify_retry() {
+  local i out
+  for i in $(seq 1 20); do
+    if out="$(VBoxManage modifyvm "$VM" "$@" 2>&1)"; then return 0; fi
+    case "$out" in *"locked for a session"*|*"being unlocked"*) sleep 2; continue ;; esac
+    echo "$out" >&2; return 1
+  done
+  echo "$out" >&2; return 1
+}
+
 # The VM must be registered on this host's VirtualBox.
 if ! VBoxManage showvminfo "$VM" >/dev/null 2>&1; then
   echo "ERROR: VM '$VM' is not registered on this host." >&2
@@ -93,9 +105,9 @@ fi
 [[ -z "$START_TYPE" ]] && { [[ -n "${DISPLAY:-}" ]] && START_TYPE="gui" || START_TYPE="headless"; }
 
 echo "Configuring '$VM': bridged via '$ADAPTER' (no NAT), L1D flush on VM entry, nested paging OFF..."
-VBoxManage modifyvm "$VM" --nic1 bridged --bridgeadapter1 "$ADAPTER" --cableconnected1 on
-VBoxManage modifyvm "$VM" --l1d-flush-on-vm-entry on
-VBoxManage modifyvm "$VM" --nested-paging off
+modify_retry --nic1 bridged --bridgeadapter1 "$ADAPTER" --cableconnected1 on
+modify_retry --l1d-flush-on-vm-entry on
+modify_retry --nested-paging off
 
 echo "Starting '$VM' ($START_TYPE)..."
 VBoxManage startvm "$VM" --type "$START_TYPE"
