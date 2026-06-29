@@ -5,19 +5,21 @@
 `build-vm.sh` builds a Windows 11 VirtualBox virtual machine and installs a complete
 TimeClock Plus WebEdition development environment, hands-free, from a single command.
 
-It runs as an orchestrator on a Linux host: it performs the actual build **inside the
-`vmbuilder` container**, so the host itself needs almost nothing. From one command it pulls
-the Windows 11 ISO and the server config from the registry, creates and boots the VM,
-installs Windows unattended, installs the full toolchain, clones the private repositories,
-builds the server and client, restores a test database, and starts the runtime servers on
-every boot. It can also export the finished VM as a portable OVA appliance.
+It runs as an orchestrator on a Linux host: by default it performs the actual build **inside the
+`vmbuilder` container**, so the host itself needs almost nothing. With `--no-container` it instead
+builds directly on the host's own VirtualBox (see [Building on the host](#building-on-the-host-no-container)).
+Either way, from one command it pulls the Windows 11 ISO and the server config from the registry,
+creates and boots the VM, installs Windows unattended, installs the full toolchain, clones the
+private repositories, builds the server and client, restores a test database, and starts the
+runtime servers on every boot. It can also export the finished VM as a portable OVA appliance.
 
 This file is the single source of truth; it replaces the older setup guides.
 
 ## Prerequisites (host)
 
 - A Linux host with the VirtualBox kernel module loaded (`/dev/vboxdrv` present).
-- Docker.
+- Docker, for the default container build. Not needed with `--no-container` (see
+  [Building on the host](#building-on-the-host-no-container) for what the host needs instead).
 - The GitHub CLI (`gh`) logged in, or a GitHub token. Credentials are auto-sourced from the
   `gh` login when present and are used for the private-repo clone and the GitHub NuGet source.
 - Network access to GitHub Container Registry (`ghcr.io`).
@@ -79,7 +81,7 @@ is tee'd to `.logs/build-vm-<timestamp>.log`. After each run, `.logs/latest.log`
 
 | Flag | Meaning |
 |---|---|
-| `--unattended` | Hands-free install: auto C:/D: partitions, local admin `dev`/`dev`, Guest Additions, full toolchain, clone, build, and server auto-start |
+| `--unattended` | Hands-free install: auto C:/D: partitions, local admin `dev`/`dev`, Guest Additions, full toolchain, clone, build, and server auto-start. Implies `-y` (no confirmation prompt) |
 | `--iso PATH` | Windows 11 ISO. Optional; auto-pulled from `ghcr.io/tcp-software/win11-iso:25h2` if omitted |
 | `--cfg PATH` | `cfg.zip` server config. Optional; auto-pulled from `ghcr.io/tcp-software/we-cfg:latest` if omitted |
 | `--gh-token TOKEN` / `--gh-user USER` | GitHub credentials for the clone and NuGet source. Required for a real run; auto-sourced from the `gh` login or `$GH_TOKEN`/`$GH_USER` |
@@ -87,6 +89,7 @@ is tee'd to `.logs/build-vm-<timestamp>.log`. After each run, `.logs/latest.log`
 | `--watch` | Follow the install live (`[guest]`/`[log]`) and build an annotated screenshot timelapse under `.logs/` |
 | `--export DIR` | After the build, power off and export a portable OVA into host directory `DIR` |
 | `--export-only DIR` | Skip the build; export the VM already in the running container into `DIR` |
+| `--no-container` / `--host-build` | Build directly on this host's VirtualBox instead of inside the `vmbuilder` container (no Docker). Defaults to **bridged** networking (the host has real DHCP) so the VM is device-reachable; pass `--nat` or `--bridge-adapter NAME` to override. The host must have the VirtualBox userland and the ISO-remaster tools. Pair with a fresh `--vm-name` to avoid clobbering an existing VM. See [Building on the host](#building-on-the-host-no-container) |
 | `--dry-run` | Stage a marker so the in-guest tool install runs dummy steps (each sleeps a few seconds) to verify the whole flow in minutes; no credentials needed |
 | `--clean` | Remove an existing same-named VM (and leftover VM files) before building, instead of resuming it. Without it, an existing VM resumes and leftover files abort creation with a clear message telling you to pass `--clean` |
 | `--stop-at STAGE` | Stop the build after `STAGE` (default `all`). In order: `tools` (toolchain only, before any clone), `clone` (+ repo clone), `server`, `client`, `db` (DB restore + SQL logins + nginx), `cfg` (per-server cfg + firewall), `servers` (start them = full run). Stopping before `servers` starts none |
@@ -101,7 +104,7 @@ is tee'd to `.logs/build-vm-<timestamp>.log`. After each run, `.logs/latest.log`
 | `--log-file PATH` | Tee the in-guest build transcript here. The host run is also logged to `.logs/build-vm-<timestamp>.log` |
 | `--vm-name NAME` / `--base-folder PATH` | VM name and parent directory |
 | `--skip-install` | Do not create a VM; only ensure VirtualBox is installed |
-| `-y`, `--yes` | Do not prompt for confirmation |
+| `-y`, `--yes` | Do not prompt for confirmation. Already implied by `--unattended`, so it's only needed for a non-unattended run |
 | `-h`, `--help` | Full description, all options, and examples |
 
 ## What Gets Installed, Built, and Run
@@ -209,11 +212,43 @@ interface — skipping `docker0`/`veth*`), no NAT, **`--l1d-flush-on-vm-entry on
 **`--nested-paging off`** (the disable-EPT + flush-L1D L1TF mitigation posture), then starts it.
 The VM must be powered off to apply these (pass `--force` to power it off first).
 
+## Building on the Host (no container)
+
+Pass `--no-container` (alias `--host-build`) to skip Docker and build straight on the host's own
+VirtualBox. The in-guest install is identical to the container build; only the orchestration side
+changes — `VBoxManage` runs on the host instead of inside the container, the VM lands in the host's
+VirtualBox registry, and networking defaults to **bridged** (the host has real DHCP, so the VM is
+device-reachable out of the box).
+
+```bash
+# Full from-scratch host build into a roomy base folder, with a fresh VM name:
+./build-vm.sh --no-container --unattended --vm-name Win11HostBuild \
+  --base-folder /mnt/data/win11-hostbuild --clean -y
+```
+
+The host needs the build prerequisites the container would otherwise provide:
+
+- The VirtualBox userland (`VBoxManage`) and the Guest Additions ISO (the build attaches
+  `/usr/share/virtualbox/VBoxGuestAdditions.iso`).
+- The ISO-remaster tools: `oras` (registry pull), `xorriso`, `wimlib-imagex`, and `7z`.
+- Enough free disk for the VM. The default machine folder is often small; point `--base-folder`
+  at a volume with **100 GB+** free.
+- A writable temp directory with **~15 GB** free for splitting `install.wim` into `.swm` parts.
+  The build picks a host temp dir next to the cache folder automatically, avoiding a small `/tmp`.
+
+A from-scratch host build runs the same way as the container build: Windows install, Guest
+Additions, the 8-stage toolchain, the repo clone, the server and client build, the database
+restore, the per-server config, and the start of all four servers — then `--export DIR` writes the
+OVA directly to the host folder (no container copy step). Watch out for a stale, orphaned
+`VBoxHeadless` process holding RAM, which can push the new VM into an out-of-memory abort during
+boot; free that memory first if a from-scratch build aborts early.
+
 ## Networking, Server Config, and Cache
 
-- **Networking:** the build runs inside the container, where bridged networking has no DHCP,
-  so the guest uses **NAT** by default to get outbound internet. Pass `--bridge-adapter NAME`
-  when an external device must reach the VM.
+- **Networking:** in the default container build, bridged networking has no DHCP, so the guest
+  uses **NAT** by default to get outbound internet; pass `--bridge-adapter NAME` when an external
+  device must reach the VM. A `--no-container` host build defaults to **bridged** instead (the host
+  has real DHCP), so the VM is device-reachable without extra flags.
 - **Server config (`cfg.zip`):** auto-pulled from ghcr and applied during the build. Provide
   a local copy with `--cfg PATH` to override.
 - **Cache:** the download cache defaults to a durable host folder

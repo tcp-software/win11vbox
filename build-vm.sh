@@ -114,7 +114,8 @@ REQUIRED CREDENTIALS (real run; not needed for --dry-run)
 
 OPTIONS
   --unattended           Hands-free install: auto C:/D: partitions, local admin dev/dev,
-                         Guest Additions + full toolchain + clone + post-build, no keypresses
+                         Guest Additions + full toolchain + clone + post-build, no keypresses.
+                         Implies -y (skips the confirmation prompt).
   --iso PATH             Windows 11 ISO (OPTIONAL - auto-pulled from ghcr win11-iso:25h2 if omitted)
   --cfg PATH             cfg.zip server config (OPTIONAL - auto-pulled from ghcr we-cfg:latest if omitted)
   --vm-name NAME         VM name (default: Win11)
@@ -192,7 +193,7 @@ OPTIONS
   --log-file PATH        Tee a full transcript of the run here (default: ./build-vm-<ts>.log)
   --base-folder PATH     Parent directory for the VM
   --skip-install         Don't create a VM; just ensure VirtualBox is installed
-  -y, --yes              Assume yes; don't prompt for confirmation
+  -y, --yes              Assume yes; don't prompt for confirmation (already implied by --unattended)
   -h, --help             Show this help and exit
 
   Note: cfg.zip (server config) is auto-pulled from ghcr (we-cfg) and applied during the
@@ -963,7 +964,7 @@ while [[ $# -gt 0 ]]; do
     -y|--yes) ASSUME_YES=true; shift ;;
     --base-folder) BASE_FOLDER="$2"; shift 2 ;;
     --skip-install) SKIP_INSTALL=true; shift ;;
-    --unattended) UNATTENDED=true; shift ;;
+    --unattended) UNATTENDED=true; ASSUME_YES=true; shift ;;   # hands-free install implies -y (no confirm prompt)
     --no-container|--host-build) shift ;;   # host-side flag; ignored inside the build path
     --cache-dir) CACHE_DIR="$2"; shift 2 ;;
     --help|-h) print_help; exit 0 ;;
