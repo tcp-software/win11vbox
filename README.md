@@ -207,15 +207,22 @@ DHCP). To actually *run* the VM for device testing, use **`launch-vm.sh`** on th
 a VM registered in the host's VirtualBox — e.g. imported from the OVA):
 
 ```bash
-./launch-vm.sh                      # bridged (auto-detected adapter), L1D flush on, nested paging off
+./launch-vm.sh                      # bridged (auto-detected adapter), L1D flush on, nested paging on
 ./launch-vm.sh --adapter eth0       # pick the bridged host adapter explicitly
 ./launch-vm.sh --vm Win11 --force   # power off a running/saved VM first, then re-launch
+./launch-vm.sh --strict-l1tf        # stricter L1TF posture: also disable EPT (nested paging off)
 ```
 
 It sets the VM to **bridged** networking (adapter from `--adapter`, else the host's default-route
 interface — skipping `docker0`/`veth*`), no NAT, **`--l1d-flush-on-vm-entry on`**, and
-**`--nested-paging off`** (the disable-EPT + flush-L1D L1TF mitigation posture), then starts it.
-The VM must be powered off to apply these (pass `--force` to power it off first).
+**`--nested-paging on`**, then starts it. The VM must be powered off to apply these (pass `--force`
+to power it off first).
+
+`--l1d-flush-on-vm-entry on` is the primary L1TF mitigation. Nested paging stays **on** by default
+because disabling EPT starves the guest so badly that the three .NET Framework servers
+(`TerminalHubApi`, `AdmServerApi`, `WorkstationHubApi`) die during startup and never bind — only
+`AppServerApi` survives. Pass `--strict-l1tf` for the stricter disable-EPT posture, but expect only
+`AppServerApi` (8008) to stay up.
 
 ## Building on the Host (no container)
 
