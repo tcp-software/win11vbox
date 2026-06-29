@@ -33,19 +33,20 @@ the container or pulled automatically.
 # Complete hands-free build. GitHub credentials are taken from your gh login; the ISO and
 # server config are pulled from ghcr; the VM is created and Windows + the full toolchain are
 # installed; the repos are cloned and built; and all servers start on boot.
-./build-vm.sh --unattended -y
+# (--unattended implies -y, so no confirmation prompt.)
+./build-vm.sh --unattended
 
 # Supply credentials explicitly instead of relying on the gh login:
-GH_TOKEN=ghp_xxxxxxxx GH_USER=you ./build-vm.sh --unattended -y
+GH_TOKEN=ghp_xxxxxxxx GH_USER=you ./build-vm.sh --unattended
 
 # Build, then export a portable OVA appliance to a durable host folder:
-./build-vm.sh --unattended --export /mnt/data/win11-ova -y
+./build-vm.sh --unattended --export /mnt/data/win11-ova
 
 # Fast end-to-end dry run (dummy installs, ~minutes, no credentials needed) to verify the flow:
-./build-vm.sh --unattended --dry-run -y
+./build-vm.sh --unattended --dry-run
 
 # Resume a half-finished build (just re-run with the same VM name; the in-guest install is idempotent):
-./build-vm.sh --unattended -y
+./build-vm.sh --unattended
 ```
 
 A full real build takes roughly two to three hours (Visual Studio and SQL Server dominate).
@@ -55,9 +56,9 @@ A full real build takes roughly two to three hours (Visual Studio and SQL Server
 Add `--watch` for a live progress stream plus an annotated screenshot timelapse:
 
 ```bash
-./build-vm.sh --unattended --watch -y                              # build + annotated timelapse
-./build-vm.sh --unattended --watch --dry-run -y                    # fast validation with video
-./build-vm.sh --unattended --watch --export /mnt/data/win11-ova -y   # build, video, then export
+./build-vm.sh --unattended --watch                              # build + annotated timelapse
+./build-vm.sh --unattended --watch --dry-run                    # fast validation with video
+./build-vm.sh --unattended --watch --export /mnt/data/win11-ova   # build, video, then export
 ```
 
 With `--watch`, the run streams the in-guest install step (`[guest]`) and the raw installer
@@ -187,7 +188,7 @@ Devices normally connect through `TerminalHubApi` (8010).
 Add `--export DIR` to a build, or export a VM that is already built without rebuilding:
 
 ```bash
-./build-vm.sh --unattended --export /mnt/data/win11-ova -y   # build, then export
+./build-vm.sh --unattended --export /mnt/data/win11-ova   # build, then export
 ./build-vm.sh --export-only /mnt/data/win11-ova              # export the existing VM, no rebuild
 ```
 
@@ -223,7 +224,7 @@ device-reachable out of the box).
 ```bash
 # Full from-scratch host build into a roomy base folder, with a fresh VM name:
 ./build-vm.sh --no-container --unattended --vm-name Win11HostBuild \
-  --base-folder /mnt/data/win11-hostbuild --clean -y
+  --base-folder /mnt/data/win11-hostbuild --clean
 ```
 
 The host needs the build prerequisites the container would otherwise provide:
