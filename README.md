@@ -42,6 +42,10 @@ GH_TOKEN=ghp_xxxxxxxx GH_USER=you ./build-vm.sh --unattended
 # Build, then export a portable OVA appliance to a durable host folder:
 ./build-vm.sh --unattended --export /mnt/data/win11-ova
 
+# Build directly on the host without Docker (bridged by default; see "Building on the Host"):
+./build-vm.sh --no-container --unattended --vm-name Win11HostBuild \
+  --base-folder /mnt/data/win11-hostbuild --clean
+
 # Fast end-to-end dry run (dummy installs, ~minutes, no credentials needed) to verify the flow:
 ./build-vm.sh --unattended --dry-run
 
