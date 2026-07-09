@@ -26,8 +26,9 @@ This file is the single source of truth; it replaces the older setup guides.
   (`oras`, `xorriso`, `wimlib-imagex`, `7z`). Docker is **not** needed.
 - For a `--container` build: Docker (the container provides the VirtualBox userland and remaster
   tools instead).
-- The GitHub CLI (`gh`) logged in, or a GitHub token. Credentials are auto-sourced from the
-  `gh` login when present and are used for the private-repo clone and the GitHub NuGet source.
+- The GitHub CLI (`gh`) logged in, or a GitHub token — **only when the build clones** (`--stop-at
+  clone` or later). The default toolchain-only run needs none. Credentials are auto-sourced from
+  the `gh` login when present and are used for the private-repo clone and the GitHub NuGet source.
 - Network access to GitHub Container Registry (`ghcr.io`).
 
 The Windows ISO and server config are pulled automatically.
@@ -95,7 +96,7 @@ is tee'd to `.logs/build-vm-<timestamp>.log`. After each run, `.logs/latest.log`
 | `--unattended` | Hands-free install: auto C:/D: partitions, local admin `dev`/`dev`, Guest Additions, full toolchain. Implies `-y` (no confirmation prompt). By default stops before the clone; add `--stop-at all` for the full clone+build+run |
 | `--iso PATH` | Windows 11 ISO. Optional; auto-pulled from `ghcr.io/tcp-software/win11-iso:25h2` if omitted |
 | `--cfg PATH` | `cfg.zip` server config. Optional; auto-pulled from `ghcr.io/tcp-software/we-cfg:latest` if omitted |
-| `--gh-token TOKEN` / `--gh-user USER` | GitHub credentials for the clone and NuGet source. Required for a real run; auto-sourced from the `gh` login or `$GH_TOKEN`/`$GH_USER` |
+| `--gh-token TOKEN` / `--gh-user USER` | GitHub credentials for the clone and NuGet source. Required only when the build clones (`--stop-at clone` or later); auto-sourced from the `gh` login or `$GH_TOKEN`/`$GH_USER` |
 | `--aws-access-key KEY` / `--aws-secret-key SECRET` | Optional. Set as guest environment variables only. Not needed to build or run the dev server (AWS is used only by runtime features such as S3 and SES) |
 | `--watch` | Follow the install live (`[guest]`/`[log]`) and build an annotated screenshot timelapse under `.logs/` |
 | `--export DIR` | After the build, power off and export a portable OVA into host directory `DIR` |

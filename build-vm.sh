@@ -111,7 +111,8 @@ USAGE
   GH_TOKEN=... GH_USER=... ./build-vm.sh --unattended                 # toolchain only (default)
   GH_TOKEN=... GH_USER=... ./build-vm.sh --unattended --stop-at all    # full clone+build+run
 
-REQUIRED CREDENTIALS (real run; not needed for --dry-run)
+CREDENTIALS (needed only when the build clones - i.e. --stop-at clone or later; NOT for the
+default toolchain-only run or --dry-run)
   --gh-token TOKEN       GitHub token for the private-repo clone + GitHub NuGet source
                          (or set $GH_TOKEN). Plaintext-staged in the guest, deleted after use.
   --gh-user USER         GitHub username for the NuGet source (or set $GH_USER)
@@ -484,10 +485,12 @@ run_host_orchestrator() {
   fi
   [[ -n "$GH_TOKEN" && -n "$GH_USER" ]] && log_info "Using GitHub credentials from the gh CLI (user: $GH_USER)."
 
-  # Fail fast on missing GitHub credentials (required for a real run), before any heavy work.
+  # Fail fast on missing GitHub credentials, before any heavy work - but ONLY when the build will
+  # actually clone (--stop-at reaches 'clone' or later). The default toolchain-only run
+  # (--stop-at tools) never clones, so it needs no credentials; --dry-run never needs them either.
   local _dry=false _a _pv=""
   for _a in "$@"; do [[ "$_a" == "--dry-run" ]] && _dry=true; done
-  if [[ "$_dry" != true ]]; then
+  if [[ "$_dry" != true && "$STOP_AT" != "tools" ]]; then
     local _tok="$GH_TOKEN" _usr="$GH_USER"
     for _a in "$@"; do
       [[ "$_pv" == "--gh-token" ]] && _tok="$_a"
@@ -495,8 +498,9 @@ run_host_orchestrator() {
       _pv="$_a"
     done
     if [[ -z "$_tok" || -z "$_usr" ]]; then
-      log_error "GitHub credentials required and none found. Log in once with 'gh auth login',"
-      log_error "or set \$GH_TOKEN + \$GH_USER (or pass --gh-token/--gh-user), or use --dry-run. See --help."
+      log_error "GitHub credentials required for the clone (--stop-at $STOP_AT) and none found. Log in"
+      log_error "once with 'gh auth login', or set \$GH_TOKEN + \$GH_USER (or pass --gh-token/--gh-user),"
+      log_error "or use --dry-run, or --stop-at tools to skip the clone. See --help."
       exit 1
     fi
   fi
