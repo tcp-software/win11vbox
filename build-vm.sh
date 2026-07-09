@@ -2327,14 +2327,17 @@ if [[ "$UNATTENDED" == true ]]; then
                language="neutral" versionScope="nonSxS"
                xmlns:wcm="http://schemas.microsoft.com/WMIConfig/2002/State"
                xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
+      <!-- OOBE is skipped via the Hide* screens + the UserAccounts/AutoLogon below (Microsoft's
+           documented way to automate OOBE). SkipMachineOOBE/SkipUserOOBE are deprecated - Microsoft
+           says "Don't use the SkipMachineOOBE setting" - and on some builds (e.g. Win11 22H2) they
+           trigger "interactive sign-in process initialization has failed", so they are NOT used. -->
       <OOBE>
         <HideEULAPage>true</HideEULAPage>
         <HideOEMRegistrationScreen>true</HideOEMRegistrationScreen>
         <HideOnlineAccountScreens>true</HideOnlineAccountScreens>
+        <HideLocalAccountScreen>true</HideLocalAccountScreen>
         <HideWirelessSetupInOOBE>true</HideWirelessSetupInOOBE>
         <ProtectYourPC>3</ProtectYourPC>
-        <SkipMachineOOBE>true</SkipMachineOOBE>
-        <SkipUserOOBE>true</SkipUserOOBE>
       </OOBE>
       <UserAccounts>
         <LocalAccounts>
