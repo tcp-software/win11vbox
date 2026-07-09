@@ -1207,16 +1207,16 @@ fi
 [[ -f "$ISO_PATH" ]] || { log_error "ISO file not found: $ISO_PATH"; exit 1; }
 [[ "$DISK_TYPE" == "dynamic" || "$DISK_TYPE" == "fixed" ]] || { log_error "Disk type must be fixed or dynamic"; exit 1; }
 
-# GitHub credentials are REQUIRED for a real run (private-repo clone + GitHub NuGet source).
-# AWS keys are OPTIONAL - the WebEdition build/local run does not need them (they're only
-# for runtime AWS features), so we just set them when supplied. --dry-run needs neither.
-if [[ "$DRY_RUN" != true ]]; then
+# GitHub credentials are needed only when the build will CLONE (--stop-at clone or later). The
+# default toolchain-only run (--stop-at tools) skips the clone, so it needs none; --dry-run never
+# does. AWS keys are always OPTIONAL (only for runtime AWS features), set when supplied.
+if [[ "$DRY_RUN" != true && "$STOP_AT" != "tools" ]]; then
   _miss=()
   [[ -n "$GH_TOKEN" ]] || _miss+=("--gh-token (or \$GH_TOKEN)")
   [[ -n "$GH_USER"  ]] || _miss+=("--gh-user (or \$GH_USER)")
   if [[ ${#_miss[@]} -gt 0 ]]; then
-    log_error "Missing required GitHub credentials: ${_miss[*]}"
-    log_error "Supply them, or use --dry-run for a credential-free flow check. See --help."
+    log_error "Missing GitHub credentials needed for the clone (--stop-at $STOP_AT): ${_miss[*]}"
+    log_error "Supply them, use --stop-at tools to skip the clone, or --dry-run. See --help."
     exit 1
   fi
 fi
