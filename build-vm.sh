@@ -554,12 +554,32 @@ run_host_orchestrator() {
 
   ensure_host_vboxdrv
   [[ "$NO_CONTAINER" == true ]] || ensure_docker
-  ensure_oras
-  ghcr_login
-  oras_pull_iso
+  # Detect an explicit --iso / --cfg up front so we SKIP the matching ghcr pull entirely (a
+  # user-supplied file is used as-is; oras is never invoked for it).
+  local _iso="" _cfg="" _pv2=""
+  for _a in "$@"; do
+    [[ "$_pv2" == "--iso" ]] && _iso="$_a"
+    [[ "$_pv2" == "--cfg" ]] && _cfg="$_a"
+    _pv2="$_a"
+  done
+
+  # oras + ghcr login are only needed to PULL from ghcr. Skip both when the user supplied their own
+  # ISO and cfg (so --iso doesn't require oras, ghcr auth, or a network pull at all).
+  if [[ -z "$_iso" || -z "$_cfg" ]]; then
+    ensure_oras
+    ghcr_login
+  fi
+
+  # ISO: use the provided --iso as-is (no oras pull); otherwise fetch/cache it from ghcr.
+  if [[ -n "$_iso" ]]; then
+    [[ -f "$_iso" ]] || { log_error "--iso file not found: $_iso"; exit 1; }
+    HOST_ISO_PATH="$_iso"
+    log_success "Using provided Win11 ISO (skipping the ghcr pull): $_iso"
+  else
+    oras_pull_iso
+  fi
+
   # cfg.zip: use a provided --cfg (placed where the /iso mount can see it), else pull from ghcr.
-  local _cfg="" _pcfg=""
-  for _a in "$@"; do [[ "$_pcfg" == "--cfg" ]] && _cfg="$_a"; _pcfg="$_a"; done
   if [[ -n "$_cfg" ]]; then
     [[ -f "$_cfg" ]] || { log_error "--cfg file not found: $_cfg"; exit 1; }
     mkdir -p "$CACHE_DIR/iso"; cp -f "$_cfg" "$CACHE_DIR/iso/cfg.zip"
@@ -567,9 +587,6 @@ run_host_orchestrator() {
   else
     oras_pull_cfg
   fi
-  # An explicit --iso on the command line overrides the oras-fetched ISO.
-  local a prev=""
-  for a in "$@"; do [[ "$prev" == "--iso" ]] && HOST_ISO_PATH="$a"; prev="$a"; done
 
   # --no-container: build directly on the host instead of inside the vmbuilder container. Same
   # inner build path, just with host paths and host VirtualBox, and bridged by default (the host
