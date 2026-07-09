@@ -39,9 +39,10 @@ GH_TOKEN="${GH_TOKEN:-}"
 RESUME=false
 CLEAN=false
 EXPORT_FILE=""
-# --stop-at: stop the build after a chosen stage (default 'all' = full pipeline). --servers:
+# --stop-at: stop the build after a chosen stage. Default 'tools' stops just before the clone
+# (toolchain only); pass 'all' (= start-servers) for the full clone+build+run pipeline. --servers:
 # which WebEdition servers to start (default 'all'). Both are validated by validate_build_opts.
-STOP_AT="all"
+STOP_AT="tools"
 SERVERS_SPEC="all"
 # cfg.zip (server config: TCPCONN.XML etc.) is pulled from ghcr so the post-build step is
 # fully automated - no manual download needed.
@@ -53,11 +54,11 @@ GH_USER="${GH_USER:-}"
 AWS_ACCESS_KEY="${AWS_ACCESS_KEY_ID:-}"
 AWS_SECRET_KEY="${AWS_SECRET_ACCESS_KEY:-}"
 
-# Ordered pipeline stages a build can stop AT. 'all' is an alias for 'servers' (the full run).
-# 'tools' stops right after the toolchain install, BEFORE the repo clone (the guest skips the
-# clone step). 'clone' stops after the toolchain + clone. Both skip post_build; the rest are
-# post_build phases. Used by both the host and the in-container parse.
-BUILD_STAGES="tools clone server client db cfg servers"
+# Ordered pipeline stages a build can stop AT. 'all' is an alias for 'start-servers' (the full
+# run). 'tools' (the DEFAULT) stops right after the toolchain install, BEFORE the repo clone (the
+# guest skips the clone step). 'clone' stops after the toolchain + clone. Both skip post_build; the
+# rest are post_build phases. Used by both the host and the in-container parse.
+BUILD_STAGES="tools clone server client db cfg start-servers"
 # Echo the 0-based position of stage $1 in BUILD_STAGES, or -1 if unknown.
 stage_index(){ local i=0 s; for s in $BUILD_STAGES; do [[ "$s" == "$1" ]] && { echo "$i"; return; }; i=$((i+1)); done; echo -1; }
 # Validate a --servers spec (comma/space list of known server tokens). Returns nonzero on a bad token.
@@ -86,26 +87,29 @@ cat <<'EOF'
 build-vm.sh - build a Windows 11 VirtualBox developer VM (TimeClock Plus toolchain), unattended.
 
 WHAT IT DOES
-  A complete, hands-free end-to-end build. With just your GitHub credentials it: pulls the
+  A hands-free Windows 11 developer-VM build. With just your GitHub credentials it: pulls the
   Win11 ISO and cfg.zip from ghcr; creates the VM; remasters the ISO for a no-prompt
-  unattended Windows install; boots it; auto-installs Guest Additions and the full dev
+  unattended Windows install; boots it; and auto-installs Guest Additions and the full dev
   toolchain (Cygwin, Git, Node.js, Python, OpenJDK 11, the .NET SDKs, Visual Studio 2026,
-  SQL Server 2022); clones the private tcp-software repos; adds the GitHub NuGet source;
-  applies the server config and builds server + client, restores the test DB, creates SQL
-  logins, scaffolds nginx, and installs a boot task that starts all four WebEdition servers
-  (App, Admin, TerminalHub, WorkstationHub) on every boot (the post-build step, on by
-  default); then deletes the staged credentials. Optionally exports the VM as a portable OVA.
-  A linclock/clock device connects to TerminalHubApi - which is up automatically.
+  SQL Server 2022). By DEFAULT it stops there - just before the repo clone. Add --stop-at all
+  (or a specific stage) to go further: clone the private tcp-software repos, add the GitHub
+  NuGet source, apply the server config, build server + client, restore the test DB, create SQL
+  logins, scaffold nginx, and install a boot task that starts all four WebEdition servers
+  (App, Admin, TerminalHub, WorkstationHub) on every boot; then delete the staged credentials.
+  Optionally exports the VM as a portable OVA. A linclock/clock device connects to
+  TerminalHubApi - which the full run brings up automatically.
 
-  Run on the host, the script is an ORCHESTRATOR: it does the actual build inside the
-  vmbuilder container (it needs /dev/vboxdrv + docker). If a VM with the same name
-  already exists it RESUMES the (idempotent) in-guest install instead of recreating it.
+  Run on the host, the script is an ORCHESTRATOR. By DEFAULT it builds directly on this host's
+  VirtualBox (no Docker; needs /dev/vboxdrv + the VirtualBox userland + ISO-remaster tools).
+  Pass --container to build inside the vmbuilder Docker container instead. If a VM with the same
+  name already exists it RESUMES the (idempotent) in-guest install instead of recreating it.
 
   NOTE: screen recording is intentionally NOT built in - VirtualBox's recorder
   destabilized the guest. For a live progress view + a timelapse video, add --watch.
 
 USAGE
-  GH_TOKEN=... GH_USER=... ./build-vm.sh --unattended -y      # ISO + cfg auto-pulled
+  GH_TOKEN=... GH_USER=... ./build-vm.sh --unattended                 # toolchain only (default)
+  GH_TOKEN=... GH_USER=... ./build-vm.sh --unattended --stop-at all    # full clone+build+run
 
 REQUIRED CREDENTIALS (real run; not needed for --dry-run)
   --gh-token TOKEN       GitHub token for the private-repo clone + GitHub NuGet source
@@ -114,8 +118,9 @@ REQUIRED CREDENTIALS (real run; not needed for --dry-run)
 
 OPTIONS
   --unattended           Hands-free install: auto C:/D: partitions, local admin dev/dev,
-                         Guest Additions + full toolchain + clone + post-build, no keypresses.
-                         Implies -y (skips the confirmation prompt).
+                         Guest Additions + full toolchain, no keypresses. Implies -y (skips the
+                         confirmation prompt). By default the build stops after the toolchain
+                         (before the clone); add --stop-at all for the full clone+build+run.
   --iso PATH             Windows 11 ISO (OPTIONAL - auto-pulled from ghcr win11-iso:25h2 if omitted)
   --cfg PATH             cfg.zip server config (OPTIONAL - auto-pulled from ghcr we-cfg:latest if omitted)
   --vm-name NAME         VM name (default: Win11)
@@ -145,20 +150,25 @@ OPTIONS
   --dry-run              Stage a marker so the in-guest tool install runs DUMMY steps (each
                          sleeps ~3s) - verifies the whole flow in minutes, no credentials
                          needed. (Formerly --test.)
-  --no-container         Build directly on this host's VirtualBox instead of inside the vmbuilder
-                         container (alias: --host-build). The host must have VirtualBox + the
-                         ISO-remaster tools. Defaults to BRIDGED networking (the host has real
-                         DHCP, unlike the container) so the VM is device-reachable; pass --nat or
-                         --bridge-adapter NAME to override. The VM lands in VirtualBox's default
-                         machine folder. Pair with a fresh --vm-name to avoid clobbering an existing VM.
+  --container            Build inside the vmbuilder Docker container (needs Docker). The DEFAULT
+                         is a direct build on THIS host's VirtualBox - no Docker; the host needs the
+                         VirtualBox userland + the ISO-remaster tools (oras/xorriso/wimlib/7z). The
+                         host build uses BRIDGED networking by default (real DHCP, so the VM is
+                         device-reachable); --container uses NAT (no bridged DHCP in the container).
+                         Pass --nat or --bridge-adapter NAME to override. The host VM lands in
+                         VirtualBox's default machine folder; pair with a fresh --vm-name to avoid
+                         clobbering an existing VM.
+  --no-container         Force the default host build explicitly (alias: --host-build). No-op
+                         unless you also passed --container earlier in the same command line.
   --clean                Remove an existing VM of the same name (and any leftover VM files)
                          before building, instead of resuming it. Without it, an existing VM is
                          resumed, and leftover files abort creation with a clear message.
-  --stop-at STAGE        Stop the build after STAGE (default: all = full pipeline). Each stage
-                         includes all earlier ones; stopping before 'servers' starts none. Stages,
-                         in order:
+  --stop-at STAGE        Stop the build after STAGE (default: tools = stop just before the clone;
+                         pass 'all' for the full pipeline). Each stage includes all earlier ones;
+                         stopping before 'start-servers' starts none. Stages, in order:
                            tools   - install the full toolchain only, then stop BEFORE cloning
                                      anything (the guest skips the clone step). D:\Work is empty.
+                                     THIS IS THE DEFAULT.
                            clone   - + clone the repos to D:\Work, then stop before any compile.
                            server  - + compile the WebEdition server solution (nant build of
                                      tcp-we-7.sln): the four .NET API servers and their deps.
@@ -171,8 +181,8 @@ OPTIONS
                                      nginx as a Windows service.
                            cfg     - + write each server's per-instance cfg and open the firewall
                                      ports. Servers are fully configured but NOT started.
-                           servers - + start the selected servers and install the boot task
-                                     (= the full run; this is the default).
+                           start-servers - + start the selected servers and install the boot task.
+                                     'all' is an alias for this (the full clone+build+run).
   --servers SPEC         Which WebEdition servers to start, comma-separated (default: all). The
                          selection persists (D:\Tools\servers.spec) so the boot task starts the
                          same set on every boot. Tokens (raw listen port in parens):
@@ -196,27 +206,34 @@ OPTIONS
   -y, --yes              Assume yes; don't prompt for confirmation (already implied by --unattended)
   -h, --help             Show this help and exit
 
-  Note: cfg.zip (server config) is auto-pulled from ghcr (we-cfg) and applied during the
-  default post-build. l1d-flush is forced OFF (turning it on aborts the guest at early boot)
-  and screen recording is not used (it destabilized the guest) - both are intentionally not options.
+  Note: cfg.zip (server config) is auto-pulled from ghcr (we-cfg) and applied during post-build
+  (which only runs at --stop-at server or later). l1d-flush is forced OFF (turning it on aborts
+  the guest at early boot) and screen recording is not used (it destabilized the guest) - both
+  are intentionally not options.
 
 EXAMPLES
-  # Complete hands-free build (ISO + cfg auto-pulled; clone + build + post-build by default).
-  # Credentials come from the environment - the minimal-interaction default:
+  # Default: toolchain only, then stop just before the clone. Host build (no Docker).
+  # Credentials come from the environment:
   export GH_TOKEN=ghp_xxx GH_USER=myuser
-  ./build-vm.sh --unattended -y
+  ./build-vm.sh --unattended
 
-  # Live progress + an annotated timelapse video:
-  ./build-vm.sh --unattended --watch -y
+  # Full clone + build + run (all four servers start and auto-start on boot):
+  ./build-vm.sh --unattended --stop-at all
 
-  # Build, then export a portable OVA appliance into a host folder:
-  ./build-vm.sh --unattended --watch --export /mnt/data/win11-ova -y
+  # Full build inside the vmbuilder Docker container instead of on this host:
+  ./build-vm.sh --unattended --stop-at all --container
+
+  # Full build with live progress + an annotated timelapse video:
+  ./build-vm.sh --unattended --stop-at all --watch
+
+  # Full build, then export a portable OVA appliance into a host folder:
+  ./build-vm.sh --unattended --stop-at all --export /mnt/data/win11-ova
 
   # Fast end-to-end DRY RUN (dummy installs, ~minutes; no credentials needed):
-  ./build-vm.sh --unattended --dry-run --watch -y
+  ./build-vm.sh --unattended --stop-at all --dry-run --watch
 
   # Resume a half-finished build (just re-run with the same --vm-name):
-  ./build-vm.sh --unattended -y
+  ./build-vm.sh --unattended --stop-at all
 
   # Export only - the VM is already built in the running container, no rebuild:
   ./build-vm.sh --export-only /mnt/data/win11-ova
@@ -447,7 +464,11 @@ oras_pull_cfg() {
 
 run_host_orchestrator() {
   export LOGNAME="${LOGNAME:-$(whoami)}" USER="${USER:-$(whoami)}"
-  log_info "Host orchestrator: minimal host setup, then build inside the vmbuilder container."
+  if [[ "$NO_CONTAINER" == true ]]; then
+    log_info "Host orchestrator: building directly on this host's VirtualBox (no container)."
+  else
+    log_info "Host orchestrator: minimal host setup, then build inside the vmbuilder container."
+  fi
 
   # Auto-source GitHub credentials from the gh CLI / its stored config, so the user doesn't
   # have to set $GH_TOKEN / $GH_USER by hand. Tries the env first, then `gh auth token`, then
@@ -510,7 +531,7 @@ run_host_orchestrator() {
       if [[ "$prev" == "--iso" || "$prev" == "--cfg" || "$prev" == "--export" || "$prev" == "--export-only" ]]; then prev=""; continue; fi
       case "$a" in
         --iso|--cfg|--export|--export-only) prev="$a"; continue ;;   # flag + value: re-added / host-side
-        --watch|--no-container|--host-build) continue ;;             # host-side / not inner flags
+        --watch|--container|--no-container|--host-build) continue ;; # host-side / not inner flags
       esac
       inner_args+=("$a"); prev=""
     done
@@ -626,7 +647,7 @@ HINTRO="$HREPO/assets/timelapse-install-frames"
 # container) find exits non-zero, pipefail propagates it, and the bare assignment would make
 # set -e kill the whole script here - silently, before ensure_virtualbox even runs.
 HFONT="$(find /usr/share/fonts -name 'DejaVuSans.ttf' 2>/dev/null | head -1 || true)"
-WATCH=false; EXPORT_DIR=""; EXPORT_ONLY=""; DRYRUN=false; NO_CONTAINER=false; _pv=""
+WATCH=false; EXPORT_DIR=""; EXPORT_ONLY=""; DRYRUN=false; NO_CONTAINER=true; _pv=""
 for _a in "$@"; do
   case "$_pv" in
     --export)      EXPORT_DIR="$_a" ;;
@@ -637,6 +658,7 @@ for _a in "$@"; do
   [[ "$_a" == "--watch" ]] && WATCH=true
   [[ "$_a" == "--dry-run" ]] && DRYRUN=true
   [[ "$_a" == "--no-container" || "$_a" == "--host-build" ]] && NO_CONTAINER=true
+  [[ "$_a" == "--container" ]] && NO_CONTAINER=false
   _pv="$_a"
 done
 # Normalize + validate the new options up front so a typo fails fast (before the container spins
@@ -644,18 +666,18 @@ done
 # the user's shell history must not reject a pure re-export.
 WAIT_PORTS=""
 if [[ -z "$EXPORT_ONLY" ]]; then
-  # 'all' is the full pipeline; map it to its concrete final stage 'servers'. An empty/whitespace
+  # 'all' is the full pipeline; map it to its concrete final stage 'start-servers'. An empty/space
   # --servers means 'all' (matching start_servers.sh), so the host's readiness gate covers the
   # same servers the guest actually starts rather than diverging to the no-servers path.
-  [[ "$STOP_AT" == "all" ]] && STOP_AT="servers"
+  [[ "$STOP_AT" == "all" ]] && STOP_AT="start-servers"
   [[ -z "${SERVERS_SPEC// /}" ]] && SERVERS_SPEC="all"
   if [[ "$(stage_index "$STOP_AT")" == "-1" ]]; then
-    log_error "--stop-at: unknown stage '$STOP_AT'. Valid: ${BUILD_STAGES// /, }, all (default)."; exit 2
+    log_error "--stop-at: unknown stage '$STOP_AT'. Valid: ${BUILD_STAGES// /, }, all ('tools' is the default; 'all' = full run)."; exit 2
   fi
   valid_servers_spec "$SERVERS_SPEC" || { log_error "--servers: unknown token in '$SERVERS_SPEC'. Valid: app, adm, terminal, workstation, linclock, all (comma-separated)."; exit 2; }
   # Ports the host should wait for (export gate + --watch stop). Only the SELECTED servers start,
-  # and only when the build runs through the 'servers' stage; an earlier --stop-at starts none.
-  if [[ "$STOP_AT" == "servers" ]]; then
+  # and only when the build runs through the 'start-servers' stage; an earlier --stop-at starts none.
+  if [[ "$STOP_AT" == "start-servers" ]]; then
     for _t in ${SERVERS_SPEC//,/ }; do
       case "$_t" in
         app) WAIT_PORTS+=" 8008" ;; adm|admin) WAIT_PORTS+=" 8012" ;; terminal) WAIT_PORTS+=" 8010" ;;
@@ -665,8 +687,8 @@ if [[ -z "$EXPORT_ONLY" ]]; then
     done
     WAIT_PORTS="$(printf '%s\n' $WAIT_PORTS | sort -u | tr '\n' ' ' | sed 's/ *$//')"
   fi
-  [[ "$STOP_AT" != "servers" ]] && log_info "--stop-at $STOP_AT: build will stop after that stage (servers not started)."
-  [[ "$STOP_AT" == "servers" && "$SERVERS_SPEC" != "all" ]] && log_info "--servers $SERVERS_SPEC: starting only [$WAIT_PORTS]."
+  [[ "$STOP_AT" != "start-servers" ]] && log_info "--stop-at $STOP_AT: build will stop after that stage (servers not started)."
+  [[ "$STOP_AT" == "start-servers" && "$SERVERS_SPEC" != "all" ]] && log_info "--servers $SERVERS_SPEC: starting only [$WAIT_PORTS]."
 fi
 
 # VBoxManage wrapper used by the host-side helpers (gst/glg, wait_for_ready, watch_capture,
@@ -965,7 +987,7 @@ while [[ $# -gt 0 ]]; do
     --base-folder) BASE_FOLDER="$2"; shift 2 ;;
     --skip-install) SKIP_INSTALL=true; shift ;;
     --unattended) UNATTENDED=true; ASSUME_YES=true; shift ;;   # hands-free install implies -y (no confirm prompt)
-    --no-container|--host-build) shift ;;   # host-side flag; ignored inside the build path
+    --container|--no-container|--host-build) shift ;;   # host-side flag; ignored inside the build path
     --cache-dir) CACHE_DIR="$2"; shift 2 ;;
     --help|-h) print_help; exit 0 ;;
     *) log_error "Unknown option: $1"; usage ;;
@@ -1846,10 +1868,12 @@ set "IFACE=D:\Work\tcp-we-71\server\Src\Interface"
 rem PHASE: a short label for the timelapse caption (capture_screens.ps1 reads build_phase.txt).
 set "PHASE=D:\Tools\build_phase.txt"
 rem --stop-at / --servers, from markers the orchestrator stages next to this script. STOPAT is
-rem the last phase to run (server|client|db|cfg|servers); 'servers' (default) is the full run.
+rem the last phase to run (server|client|db|cfg|start-servers); 'start-servers' is the full run.
+rem post_build only runs at all when the host stages post_build.do (i.e. --stop-at server or
+rem later), so this default just names the fall-through end phase.
 rem SRVSPEC is which servers to start (a comma list); written to D:\Tools\servers.spec so the
 rem boot task (and start_servers.sh) reads the same selection on every boot.
-set "STOPAT=servers"
+set "STOPAT=start-servers"
 if exist "%HERE%post_build.stop" set /p STOPAT=<"%HERE%post_build.stop"
 set "SRVSPEC=all"
 if exist "%HERE%servers.spec" set /p SRVSPEC=<"%HERE%servers.spec"
@@ -1947,7 +1971,7 @@ echo ==== post_build done %DATE% %TIME% ==== >> "%LOG%"
 endlocal
 exit /b 0
 
-rem --stop-at landed before 'servers': record the stopping point so the host watcher/exporter
+rem --stop-at landed before 'start-servers': record the stopping point so the host watcher/exporter
 rem knows the build is finished even though no ports will ever come up, and tag the timelapse.
 :stopped
 >"%PHASE%" echo Stopped at %STOPAT% (--stop-at)
@@ -2946,7 +2970,7 @@ EOF
   # --stop-at controls how far it goes: 'clone' skips post_build entirely (stop after the
   # toolchain + clone); otherwise post_build runs and reads post_build.stop to know which phase
   # to stop after, and servers.spec to know which servers to start.
-  [[ "$STOP_AT" == "all" ]] && STOP_AT="servers"
+  [[ "$STOP_AT" == "all" ]] && STOP_AT="start-servers"
   [[ -z "${SERVERS_SPEC// /}" ]] && SERVERS_SPEC="all"
   if [[ "$STOP_AT" == "tools" || "$STOP_AT" == "clone" ]]; then
     # Neither stage runs post_build (no post_build.do staged). 'tools' also tells the guest to
@@ -2961,8 +2985,8 @@ EOF
     : > "$STAGE_DIR/post_build.do"
     printf '%s' "$STOP_AT" > "$STAGE_DIR/post_build.stop"
     printf '%s' "$SERVERS_SPEC" > "$STAGE_DIR/servers.spec"
-    [[ "$STOP_AT" != "servers" ]] && log_info "--stop-at $STOP_AT: post_build will stop after that phase (servers not started)."
-    [[ "$STOP_AT" == "servers" && "$SERVERS_SPEC" != "all" ]] && log_info "--servers $SERVERS_SPEC: only those servers will start on boot."
+    [[ "$STOP_AT" != "start-servers" ]] && log_info "--stop-at $STOP_AT: post_build will stop after that phase (servers not started)."
+    [[ "$STOP_AT" == "start-servers" && "$SERVERS_SPEC" != "all" ]] && log_info "--servers $SERVERS_SPEC: only those servers will start on boot."
   fi
   # Stage cfg.zip (server config) so post_build can apply it: prefer an explicit --cfg,
   # else the copy the orchestrator placed next to the ISO (from --cfg or the ghcr pull).
