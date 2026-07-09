@@ -2875,6 +2875,25 @@ function Show-Details($text) {
   $logBtn.Visible = $true; $closeBtn.Visible = $true
 }
 
+# Finalize the dialog when the install is done: stop polling, drop the Cancel button, show a green
+# completion line + summary with an OK button, and auto-dismiss after a short delay so it never
+# sits stuck at 8/8 waiting for a click.
+function Finish-Setup($text) {
+  if ($script:finished) { return }
+  $script:finished = $true
+  $uiTimer.Stop()
+  $cancelBtn.Visible = $false
+  $bar.Style = 'Continuous'; $bar.Value = 100
+  $step.Text = $text; $step.ForeColor = [System.Drawing.Color]::DarkGreen
+  Show-Details (Get-Summary)
+  $closeBtn.Text = 'OK'
+  # Auto-close after a few seconds; the OK button dismisses it immediately.
+  $script:autoClose = New-Object System.Windows.Forms.Timer
+  $script:autoClose.Interval = 12000
+  $script:autoClose.Add_Tick({ $script:autoClose.Stop(); $form.Close() })
+  $script:autoClose.Start()
+}
+
 # --- Asynchronous Form UI Timer Integration ---
 $uiTimer = New-Object System.Windows.Forms.Timer
 $uiTimer.Interval = 1500
@@ -2903,14 +2922,10 @@ $uiTimer.Add_Tick({
       # finalizes regardless of which (or how many) servers were started, instead of waiting for
       # all four ports that a subset/early-stop run will never bring up.
       if (Test-Path 'D:\Tools\build.done') {
-        $script:finished = $true
-        $bar.Value = 100
         $done = ''
         try { $done = (Get-Content 'D:\Tools\build.done' -ErrorAction Stop | Select-Object -Last 1) } catch {}
-        $step.Text = if ($done -match 'stopped') { "Build complete - $done" } else { 'Build complete - servers started' }
-        $step.ForeColor = [System.Drawing.Color]::DarkGreen
-        $uiTimer.Stop()
-        Show-Details (Get-Summary)
+        $doneMsg = if ($done -match 'stopped') { "Build complete - $done" } else { 'Build complete - servers started' }
+        Finish-Setup $doneMsg
       }
       return
     }
@@ -2928,7 +2943,14 @@ $uiTimer.Add_Tick({
       $bar.Style = 'Continuous'
       $bar.Value = [math]::Min(100, [math]::Max(0, [int](($n / $total) * 100)))
       $step.Text = ("Step {0} of {1}: {2}" -f $n, $total, $txt)
-    } 
+      # Toolchain-only / clone-only runs have no post_build (no build_phase.txt), so they finish
+      # right here. Gate on D:\Tools\build.done (written just after 8/8 for tools/clone) - NOT on the
+      # "Setup complete" text alone, since a full build also shows "8/8 Setup complete - repos cloned"
+      # BEFORE post_build runs, and finalizing on that text would dismiss the dialog prematurely.
+      if (-not $script:finished -and (Test-Path 'D:\Tools\build.done')) {
+        Finish-Setup ("Setup complete - {0}" -f $txt)
+      }
+    }
     else {
       # Handle special keyword results written to the status file
       switch -regex ($line) {
