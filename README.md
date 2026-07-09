@@ -19,6 +19,56 @@ start the runtime servers on every boot. You can also stop at any intermediate s
 
 This file is the single source of truth; it replaces the older setup guides.
 
+## Build Flow
+
+```mermaid
+flowchart TD
+    Start(["<b>./build-vm.sh --unattended</b> [ options ]"])
+    Start --> Q1{"--container ?"}
+    Q1 -->|"no · DEFAULT"| Host["<b>Host build</b> · no Docker<br/>host VirtualBox · bridged (device-reachable)"]
+    Q1 -->|"--container"| Cont["<b>Container build</b><br/>vmbuilder Docker · NAT"]
+    Host --> Prep["create VM · remaster ISO<br/>unattended Windows install · Guest Additions"]
+    Cont --> Prep
+
+    Prep --> T["<b>1 · tools</b><br/>full toolchain (VS, SQL, .NET, Node)"]
+    T -->|"--stop-at clone or later"| C["<b>2 · clone</b><br/>clone repos · needs GitHub creds"]
+    C --> SV["<b>3 · server</b><br/>compile server (nant)"]
+    SV --> CL["<b>4 · client</b><br/>build client (npm)"]
+    CL --> DB["<b>5 · db</b><br/>restore DB · SQL logins · nginx"]
+    DB --> CF["<b>6 · cfg</b><br/>per-server config · open firewall"]
+    CF --> SS["<b>7 · start-servers</b><br/>start servers + boot task · (= --stop-at all)"]
+    SS --> R(["servers listening"])
+
+    T -.->|"DEFAULT: --stop-at tools stops here"| Stop(["toolchain-only VM"])
+
+    R --> EXP{"--export DIR ?"}
+    Stop --> EXP
+    EXP -->|"yes"| OVA(["power off → export OVA → DIR"])
+    EXP -->|"no"| End(["done"])
+```
+
+At a glance the pipeline is linear; `--stop-at STAGE` decides where it stops (each stage includes
+all earlier ones):
+
+```
+ tools ─► clone ─► server ─► client ─► db ─► cfg ─► start-servers
+   ▲                                                      ▲
+   └─ DEFAULT stop (--stop-at tools)      --stop-at all ──┘
+```
+
+**How the options steer it:**
+
+- `--unattended` — turns on the whole automated flow above. Without it, the script just creates the
+  VM and prints a manual install checklist.
+- `--container` — run the build inside Docker (NAT) instead of the default host build (bridged).
+- `--stop-at STAGE` — stop after `STAGE` (default `tools`; `all` = `start-servers`). Credentials are
+  needed only from `clone` onward.
+- `--servers SPEC` — at the `start-servers` stage, choose which of the four servers start.
+- Following: by default the script **follows the install and waits** for the chosen stage to finish,
+  stopping with an error if one occurs; `--detach` returns as soon as the VM starts, and `--watch`
+  adds a timelapse.
+- `--export DIR` — after the build finishes, power off and export a portable OVA to `DIR`.
+
 ## Prerequisites (host)
 
 - A Linux host with the VirtualBox kernel module loaded (`/dev/vboxdrv` present).
