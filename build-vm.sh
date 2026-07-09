@@ -496,10 +496,17 @@ run_host_orchestrator() {
   local _hosts="${HOME}/.config/gh/hosts.yml"
   if [[ -z "$GH_TOKEN" ]]; then
     GH_TOKEN="$(gh auth token 2>/dev/null || true)"
+    # Old gh (< 2.6) has no 'auth token' subcommand and prints 'unknown command ...' + usage to
+    # STDOUT, so the capture above can be junk, not a token. Accept only real token shapes (ghp_,
+    # gho_, ghu_, ghs_, ghr_, github_pat_); otherwise clear it so the hosts.yml fallback runs -
+    # else a garbage token gets staged and the guest clone / NuGet auth fail.
+    [[ "$GH_TOKEN" =~ ^(gh[a-z]_|github_pat_)[A-Za-z0-9_]+$ ]] || GH_TOKEN=""
     [[ -z "$GH_TOKEN" && -f "$_hosts" ]] && GH_TOKEN="$(sed -n 's/^[[:space:]]*oauth_token:[[:space:]]*//p' "$_hosts" | head -1)"
   fi
   if [[ -z "$GH_USER" ]]; then
     GH_USER="$(gh api user -q .login 2>/dev/null || true)"
+    # A valid GitHub login has no whitespace; reject multi-word/usage junk from an old gh.
+    [[ "$GH_USER" =~ ^[A-Za-z0-9-]+$ ]] || GH_USER=""
     [[ -z "$GH_USER" && -f "$_hosts" ]] && GH_USER="$(sed -n 's/^[[:space:]]*user:[[:space:]]*//p' "$_hosts" | head -1)"
   fi
   [[ -n "$GH_TOKEN" && -n "$GH_USER" ]] && log_info "Using GitHub credentials from the gh CLI (user: $GH_USER)."
