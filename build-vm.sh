@@ -333,8 +333,16 @@ build_noprompt_iso() {
   extract="${work}/iso"
   mkdir -p "$extract"
 
+  # Tool output goes to this log; on failure we print its tail so the real cause (e.g. "No space
+  # left on device") is visible instead of a bare "failed" (the log lives in $work and is removed
+  # with it, so we dump the tail BEFORE cleanup).
+  local errlog="${work}/remaster.log"
+  _remaster_fail() { log_error "$1"; tail -n 15 "$errlog" 2>/dev/null | sed 's/^/    /' >&2; rm -rf "$work"; return 1; }
+
   log_info "Remastering ISO (no-prompt boot + embedded answer file). This takes a few minutes..."
-  7z x "$src_iso" -o"$extract" -bd -y >/dev/null
+  if ! 7z x "$src_iso" -o"$extract" -bd -y >"$errlog" 2>&1; then
+    _remaster_fail "7z failed to extract the source ISO ($src_iso)."; return 1
+  fi
 
   if [[ ! -f "${extract}/efi/microsoft/boot/efisys_noprompt.bin" ]]; then
     log_error "ISO has no efisys_noprompt.bin; cannot build a no-prompt installer."
@@ -345,7 +353,9 @@ build_noprompt_iso() {
   if [[ -f "${extract}/sources/install.wim" ]] \
      && [[ $(stat -c%s "${extract}/sources/install.wim") -gt 4000000000 ]]; then
     log_info "Splitting install.wim into <4 GB .swm parts..."
-    wimlib-imagex split "${extract}/sources/install.wim" "${extract}/sources/install.swm" 3800 >/dev/null
+    if ! wimlib-imagex split "${extract}/sources/install.wim" "${extract}/sources/install.swm" 3800 >"$errlog" 2>&1; then
+      _remaster_fail "wimlib-imagex failed to split install.wim."; return 1
+    fi
     rm -f "${extract}/sources/install.wim"
   fi
 
@@ -372,11 +382,14 @@ build_noprompt_iso() {
       -eltorito-alt-boot -eltorito-platform efi \
       -e efi/microsoft/boot/efisys_noprompt.bin -no-emul-boot \
       -o "$out_iso" \
-      . ) >/dev/null 2>&1
-
+      . ) >"$errlog" 2>&1
   local rc=$?
+
+  if [[ $rc -ne 0 || ! -f "$out_iso" ]]; then
+    _remaster_fail "xorriso failed to build the ISO (rc=$rc) -> $out_iso"; return 1
+  fi
   rm -rf "$work"
-  [[ $rc -eq 0 && -f "$out_iso" ]]
+  return 0
 }
 
 # ============================================================================
@@ -1119,6 +1132,33 @@ else
   VM_DIR="${DEFAULT_FOLDER}/${VM_NAME}"
 fi
 DISK_PATH="${VM_DIR}/${VM_NAME}.vdi"
+
+# Pre-flight disk-space check (fresh builds only). The ISO remaster writes a full-size no-prompt
+# ISO into the VM folder and the guest install grows the disk image there, so a too-small
+# filesystem fails cryptically mid-remaster ("No space left on device"). Fail fast with an
+# actionable message instead. free_gb_of walks up to the nearest existing ancestor, so it works
+# before VM_DIR exists, and ends with '|| true' so a df hiccup can't trip set -e.
+if [[ "$RESUME" != true ]]; then
+  free_gb_of() {
+    local p="$1"; while [[ -n "$p" && ! -e "$p" ]]; do p="$(dirname "$p")"; done; [[ -e "$p" ]] || p=/
+    df -Pk "$p" 2>/dev/null | awk 'NR==2{printf "%d",$4/1048576}' || true
+  }
+  _iso_gb=$(( $(stat -c%s "$ISO_PATH" 2>/dev/null || echo 0) / 1073741824 + 1 ))
+  _need_gb=$(( _iso_gb + 5 ))
+  _vm_free=$(free_gb_of "$VM_DIR"); _tmp_free=$(free_gb_of "${TMPDIR:-/tmp}")
+  if [[ "${_vm_free:-0}" -lt "$_need_gb" ]]; then
+    log_error "Not enough free space for the VM in: $VM_DIR"
+    log_error "  filesystem has ${_vm_free:-0} GB free; the ISO remaster alone needs ~${_need_gb} GB (source ISO is ${_iso_gb} GB), and the guest install needs far more."
+    log_error "  Point --base-folder at a larger volume, e.g.  --base-folder /mnt/data/win11-vms"
+    exit 1
+  fi
+  if [[ "${_tmp_free:-0}" -lt 15 ]]; then
+    log_error "Not enough temp space for the ISO remaster in: ${TMPDIR:-/tmp} (${_tmp_free:-0} GB free; need ~15 GB to extract + split install.wim)."
+    log_error "  Set TMPDIR to a larger volume (host builds normally use /mnt/data/win11-build-tmp)."
+    exit 1
+  fi
+  [[ "${_vm_free:-0}" -lt 90 ]] && log_warn "Only ${_vm_free:-0} GB free in $VM_DIR; a full build can grow the disk to ~100 GB+. Consider a larger --base-folder."
+fi
 
 # Handle leftover VM files. The orchestrator recreates the vmbuilder container each run, so a
 # VM from a previous build is no longer *registered* (the resume check above misses it) but its
