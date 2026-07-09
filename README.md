@@ -62,9 +62,24 @@ GH_TOKEN=ghp_xxxxxxxx GH_USER=you ./build-vm.sh --unattended --stop-at all
 The default (toolchain only) finishes much faster; a full `--stop-at all` build takes roughly two
 to three hours (Visual Studio and SQL Server dominate).
 
+### Following the install (default) and detaching
+
+By default the build **follows the in-guest install and waits for it to finish** before exiting. It
+streams the high-level step (`[guest]`) and the installer's own log (`[log]`) so you can see what
+each script is doing without running any commands by hand, and it **stops with an error** if the
+installer reports one (or the clone fails, or the VM dies). Pass `--detach` (alias `--no-follow`)
+to return as soon as the VM is started and let the install run unattended in the background.
+
+```bash
+./build-vm.sh --unattended                 # follows the toolchain install, waits, reports errors
+./build-vm.sh --unattended --stop-at all    # follows the whole build through to all servers up
+./build-vm.sh --unattended --detach         # start the VM and return immediately (old behavior)
+```
+
 ### Live progress and a timelapse video
 
-Add `--watch` for a live progress stream plus an annotated screenshot timelapse:
+Add `--watch` for the live progress stream plus an annotated screenshot timelapse (it also follows
+and waits, like the default):
 
 ```bash
 ./build-vm.sh --unattended --watch                              # build + annotated timelapse
@@ -98,7 +113,8 @@ is tee'd to `.logs/build-vm-<timestamp>.log`. After each run, `.logs/latest.log`
 | `--cfg PATH` | `cfg.zip` server config. Optional; auto-pulled from `ghcr.io/tcp-software/we-cfg:latest` if omitted |
 | `--gh-token TOKEN` / `--gh-user USER` | GitHub credentials for the clone and NuGet source. Required only when the build clones (`--stop-at clone` or later); auto-sourced from the `gh` login or `$GH_TOKEN`/`$GH_USER` |
 | `--aws-access-key KEY` / `--aws-secret-key SECRET` | Optional. Set as guest environment variables only. Not needed to build or run the dev server (AWS is used only by runtime features such as S3 and SES) |
-| `--watch` | Follow the install live (`[guest]`/`[log]`) and build an annotated screenshot timelapse under `.logs/` |
+| `--watch` | Follow the install live (`[guest]`/`[log]`) and build an annotated screenshot timelapse under `.logs/`. Also waits for the build to finish |
+| `--detach` / `--no-follow` | Return as soon as the VM is started, instead of following the install. By default the build follows the in-guest install, waits for the `--stop-at` target to finish, and stops with an error if the installer reports one |
 | `--export DIR` | After the build, power off and export a portable OVA into host directory `DIR` |
 | `--export-only DIR` | Skip the build; export the already-built VM into `DIR` (host VM by default, or the container's VM with `--container`) |
 | `--container` | Build inside the `vmbuilder` Docker container instead of on this host (needs Docker). The container uses **NAT** (no bridged DHCP inside it). The default host build uses **bridged** networking (real DHCP, so the VM is device-reachable). See [Building in a container](#building-in-a-container) |

@@ -142,7 +142,13 @@ OPTIONS
                          features (S3/SES). (or set $AWS_ACCESS_KEY_ID / $AWS_SECRET_ACCESS_KEY)
   --watch                Follow the in-guest install live ([guest]/[log]) and build an
                          annotated screenshot timelapse under .logs/ (needs no extra tools;
-                         ffmpeg is auto-resolved without sudo)
+                         ffmpeg is auto-resolved without sudo). Implies following (waits for the
+                         build to finish).
+  --detach               Return as soon as the VM is started, instead of following the install.
+                         By DEFAULT the build follows the in-guest install (streaming [guest] step
+                         + [log] output), waits for the selected --stop-at target to finish, and
+                         stops with an error if the installer reports one. --detach skips that.
+                         (--no-follow is an alias.)
   --export DIR           Wait until EVERYTHING is done (repos cloned, server compiled, all 4
                          servers listening), then power off and export a portable OVA into DIR.
                          Refuses to export a half-built VM.
@@ -548,7 +554,7 @@ run_host_orchestrator() {
       if [[ "$prev" == "--iso" || "$prev" == "--cfg" || "$prev" == "--export" || "$prev" == "--export-only" ]]; then prev=""; continue; fi
       case "$a" in
         --iso|--cfg|--export|--export-only) prev="$a"; continue ;;   # flag + value: re-added / host-side
-        --watch|--container|--no-container|--host-build) continue ;; # host-side / not inner flags
+        --watch|--follow|--detach|--no-follow|--container|--no-container|--host-build) continue ;; # host-side / not inner flags
       esac
       inner_args+=("$a"); prev=""
     done
@@ -605,7 +611,7 @@ run_host_orchestrator() {
     if [[ "$prev" == "--iso" || "$prev" == "--cfg" || "$prev" == "--export" || "$prev" == "--export-only" ]]; then prev=""; continue; fi
     case "$a" in
       --iso|--cfg|--export|--export-only) prev="$a"; continue ;;   # flag + its value dropped
-      --watch) continue ;;                                          # boolean flag dropped
+      --watch|--follow|--detach|--no-follow) continue ;;            # boolean flag dropped
     esac
     inner_args+=("$a"); prev=""
   done
@@ -664,20 +670,28 @@ HINTRO="$HREPO/assets/timelapse-install-frames"
 # container) find exits non-zero, pipefail propagates it, and the bare assignment would make
 # set -e kill the whole script here - silently, before ensure_virtualbox even runs.
 HFONT="$(find /usr/share/fonts -name 'DejaVuSans.ttf' 2>/dev/null | head -1 || true)"
-WATCH=false; EXPORT_DIR=""; EXPORT_ONLY=""; DRYRUN=false; NO_CONTAINER=true; _pv=""
+WATCH=false; EXPORT_DIR=""; EXPORT_ONLY=""; DRYRUN=false; NO_CONTAINER=true; FOLLOW=true; _pv=""
 for _a in "$@"; do
   case "$_pv" in
     --export)      EXPORT_DIR="$_a" ;;
     --export-only) EXPORT_DIR="$_a"; EXPORT_ONLY=1 ;;
     --stop-at)     STOP_AT="$_a" ;;
     --servers)     SERVERS_SPEC="$_a" ;;
+    --vm-name)     VM_NAME="$_a" ;;
   esac
   [[ "$_a" == "--watch" ]] && WATCH=true
   [[ "$_a" == "--dry-run" ]] && DRYRUN=true
   [[ "$_a" == "--no-container" || "$_a" == "--host-build" ]] && NO_CONTAINER=true
   [[ "$_a" == "--container" ]] && NO_CONTAINER=false
+  [[ "$_a" == "--follow" ]] && FOLLOW=true
+  [[ "$_a" == "--detach" || "$_a" == "--no-follow" ]] && FOLLOW=false
   _pv="$_a"
 done
+# The outer orchestrator (run_host_orchestrator, follow_progress, watch_capture, wait_for_ready,
+# do_export) talks to the VM via $HVM. VM_NAME's default is set at the top and the main --vm-name
+# parser only runs in the in-guest/inner pass, so re-derive HVM here from the pre-scanned VM_NAME -
+# otherwise a custom --vm-name is ignored host-side and every helper targets the default 'Win11'.
+HVM="$VM_NAME"
 # Normalize + validate the new options up front so a typo fails fast (before the container spins
 # up) - but only on a build run. --export-only ignores these flags entirely, so a stale value in
 # the user's shell history must not reject a pure re-export.
@@ -947,6 +961,60 @@ watch_capture(){
   log_success "timelapse (host screenshots, fallback): $OUT ($((n+intro_n)) frames, incl. ${intro_n} install-phase)"
 }
 
+# Follow the in-guest install live and BLOCK until the selected --stop-at target completes, so a
+# plain build doesn't exit the moment the VM starts. Streams the high-level step ([guest]) and the
+# installer's own log ([log]) so you see what each script is doing without running commands by hand.
+# Returns non-zero (and reports) on an installer ERROR, a clone failure, or the VM dying - so the
+# caller can stop and surface the problem. No screenshots/timelapse (that is --watch). Skipped with
+# --detach. Called as 'follow_progress || exit', which masks set -e inside so a transient guest
+# command returning non-zero can't abort the follow.
+follow_progress(){
+  local st last="" full total loglines=0 idle=0 seen=false
+  infra_alive || { log_warn "VM not available to follow."; return 0; }
+  log_info "Following the in-guest install until it finishes (pass --detach to skip and return immediately)."
+  log_info "Ctrl-C stops watching only - the install keeps running in the VM."
+  while true; do
+    st="$(gst || true)"
+    full="$(glg || true)"
+    if [[ -n "$full" ]]; then total=$(printf '%s\n' "$full" | wc -l | tr -d ' '); else total=0; fi
+    if [[ "$total" -gt "$loglines" ]]; then printf '%s\n' "$full" | sed -n "$((loglines+1)),${total}p" | sed 's/^/[log] /'; loglines=$total; fi
+    [[ -n "$st" && "$st" != "$last" ]] && { echo "[guest] $(date +%H:%M:%S) $st"; last="$st"; seen=true; }
+    [[ -n "$full" ]] && seen=true
+
+    # Hard failure: the installer flagged ERROR - print the message + recent log and stop.
+    case "$st" in *ERROR*)
+      log_error "In-guest installer reported an error:"
+      log_error "  $st"
+      log_error "Recent install log (D:\\Tools\\install_tools.log):"
+      printf '%s\n' "$full" | tail -n 20 | sed 's/^/    /'
+      log_error "The VM is left running for inspection ($HVM)."
+      return 1 ;;
+    esac
+    case "$(gcat 'D:\Work\clone_status.txt')" in *CLONE-FAILED*)
+      log_error "In-guest clone FAILED (bad/expired GitHub token or network). VM left running ($HVM)."
+      return 1 ;;
+    esac
+
+    # Completion: tools/clone finish at '8/8 Setup complete' (no post_build, no build.done); the
+    # later stages finish when probe_build_ready sees build.done (or the selected ports listening).
+    if [[ "$STOP_AT" == "tools" || "$STOP_AT" == "clone" ]]; then
+      case "$st" in *"Setup complete"*) log_success "In-guest install complete (--stop-at $STOP_AT reached 8/8)."; return 0 ;; esac
+    else
+      case "$(probe_build_ready)" in
+        ready)  log_success "Build complete: ${WAIT_PORTS:-finished per --stop-at $STOP_AT}."; return 0 ;;
+        failed) log_error "In-guest clone FAILED. VM left running ($HVM)."; return 1 ;;
+      esac
+    fi
+
+    infra_alive || { log_error "The VM stopped or was removed before the install finished (aborted?). Check VirtualBox; VM: $HVM."; return 1; }
+    idle=$((idle+1))
+    # Heartbeat while nothing has appeared yet (Windows still installing / GA not up).
+    [[ "$seen" != true && $((idle % 10)) -eq 0 ]] && log_info "still waiting for the installer to start (Windows installing / Guest Additions coming up)..."
+    [[ $idle -ge 840 ]] && { log_error "Timed out (~7h) following the install; VM left running for inspection ($HVM)."; return 1; }
+    sleep 30
+  done
+}
+
 # Run host-side orchestration unless we are already inside the container.
 if [[ -z "${VMBUILDER_INNER:-}" ]]; then
   mkdir -p "$HVID"
@@ -966,7 +1034,13 @@ if [[ -z "${VMBUILDER_INNER:-}" ]]; then
 
   [[ "$WATCH" == true ]] && ensure_ffmpeg
   run_host_orchestrator "$@" || exit $?
-  [[ "$WATCH" == true ]] && watch_capture
+  # --watch streams + builds a timelapse (and waits); otherwise follow_progress streams + waits
+  # (default; --detach skips it and returns as soon as the VM is started).
+  if [[ "$WATCH" == true ]]; then
+    watch_capture
+  elif [[ "$FOLLOW" == true ]]; then
+    follow_progress || exit $?
+  fi
   if [[ -n "$EXPORT_DIR" ]]; then
     # Only export once everything is truly done (clone + compile + servers listening).
     wait_for_ready || { log_error "Build did not reach 'all servers running' - NOT exporting."; exit 1; }
@@ -3087,7 +3161,8 @@ EOF
   echo "It now runs hands-free: Windows install -> Guest Additions + reboot -> toolchain"
   echo "(SQL, VS 2026, .NET, ...) -> clone -> apply cfg.zip -> build server+client -> restore"
   echo "DB -> SQL logins -> nginx -> start all 4 servers on boot. Total ~2-3 h."
-  echo "Watch progress (once Guest Additions are up):"
+  echo "This build FOLLOWS the install below and waits for it to finish (unless you passed --detach)."
+  echo "To watch from another terminal instead:"
   echo "  VBoxManage guestcontrol $VM_NAME --username dev --password dev run \\"
   echo "    --exe C:\\\\Windows\\\\System32\\\\cmd.exe -- cmd.exe /c \"type D:\\Tools\\install_status.txt\""
   echo "Server logs (after post-build): D:\\Tools\\serverlogs. Manual control: C:\\Setup\\start_servers.sh"
