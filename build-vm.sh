@@ -1181,6 +1181,15 @@ if VBoxManage showvminfo "$VM_NAME" >/dev/null 2>&1; then
     # from scratch instead of resuming.
     log_info "--clean: removing the existing registered VM '$VM_NAME' for a fresh build."
     VBoxManage controlvm "$VM_NAME" poweroff >/dev/null 2>&1 || true
+    # Wait for the VM to fully power off (and release its session lock) BEFORE unregistering and
+    # recreating. Without this, tearing down a *running* VM races the lingering lock, and the fresh
+    # createvm+modifyvm fails with "already locked for a session (or being unlocked)".
+    for _ in $(seq 1 30); do
+      _st=$(VBoxManage showvminfo "$VM_NAME" --machinereadable 2>/dev/null | sed -n 's/^VMState=//p' | tr -d '"')
+      [[ -z "$_st" || "$_st" == "poweroff" || "$_st" == "aborted" ]] && break
+      sleep 1
+    done
+    sleep 1   # brief settle so VBoxSVC finishes releasing the machine lock
     VBoxManage unregistervm "$VM_NAME" --delete >/dev/null 2>&1 || true
   else
     # VM already exists: don't recreate it - RESUME the in-guest install instead.
