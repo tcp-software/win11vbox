@@ -446,11 +446,22 @@ ensure_oras() {
 }
 
 ghcr_login() {
-  [[ -n "${GHCR_USER:-}" && -n "${GHCR_TOKEN:-}" ]] || { log_warn "GHCR_USER/GHCR_TOKEN not set; assuming ghcr is already authenticated."; return 0; }
-  echo "$GHCR_TOKEN" | docker login ghcr.io -u "$GHCR_USER" --password-stdin >/dev/null 2>&1 \
-    && log_info "docker logged in to ghcr.io" || log_warn "docker login to ghcr failed."
+  # ghcr hosts the Win11 ISO, cfg.zip, and the vmbuilder image as PRIVATE packages, so oras/docker
+  # need a GitHub login. Default the ghcr creds to the same ones auto-sourced for the clone
+  # (GH_USER/GH_TOKEN), so the pulls authenticate with no extra env vars.
+  : "${GHCR_USER:=${GH_USER:-}}"
+  : "${GHCR_TOKEN:=${GH_TOKEN:-}}"
+  if [[ -z "$GHCR_USER" || -z "$GHCR_TOKEN" ]]; then
+    log_warn "No ghcr credentials (set GHCR_USER/GHCR_TOKEN or 'gh auth login'); a private ghcr pull will fail unless you've already run 'docker login ghcr.io'."
+    return 0
+  fi
+  # docker login only matters for the container build (pulling the vmbuilder image).
+  if [[ "$NO_CONTAINER" != true ]]; then
+    echo "$GHCR_TOKEN" | docker login ghcr.io -u "$GHCR_USER" --password-stdin >/dev/null 2>&1 \
+      && log_info "docker logged in to ghcr.io (user: $GHCR_USER)" || log_warn "docker login to ghcr failed."
+  fi
   echo "$GHCR_TOKEN" | oras login ghcr.io -u "$GHCR_USER" --password-stdin >/dev/null 2>&1 \
-    && log_info "oras logged in to ghcr.io" || log_warn "oras login to ghcr failed."
+    && log_info "oras logged in to ghcr.io (user: $GHCR_USER)" || log_warn "oras login to ghcr failed."
 }
 
 oras_pull_iso() {
@@ -460,8 +471,18 @@ oras_pull_iso() {
   if [[ -n "$HOST_ISO_PATH" ]]; then
     log_info "Win11 ISO already cached: $HOST_ISO_PATH (skipping oras pull)"; return 0
   fi
+  # The ISO lives in a PRIVATE ghcr package, so oras needs a GitHub login. Make sure we have the
+  # user + token BEFORE the pull, and fail fast with guidance rather than a cryptic oras error.
+  if [[ -z "${GHCR_USER:-}" || -z "${GHCR_TOKEN:-}" ]]; then
+    log_error "Cannot pull the Win11 ISO from $WIN11_ISO_REF: no GitHub/ghcr credentials."
+    log_error "The ISO is a private ghcr package. Fix one of:"
+    log_error "  - run 'gh auth login' (its creds are auto-used), or"
+    log_error "  - set GHCR_USER + GHCR_TOKEN (a GitHub PAT with read:packages), or"
+    log_error "  - pass --iso /path/to/Win11.iso to use your own local ISO instead."
+    exit 1
+  fi
   log_info "Pulling Win11 ISO from $WIN11_ISO_REF via oras (large, one-time)..."
-  ( cd "$CACHE_DIR/iso" && oras pull "$WIN11_ISO_REF" ) || { log_error "oras pull of the Win11 ISO failed."; exit 1; }
+  ( cd "$CACHE_DIR/iso" && oras pull "$WIN11_ISO_REF" ) || { log_error "oras pull of the Win11 ISO failed (check ghcr auth and the token's read:packages scope)."; exit 1; }
   HOST_ISO_PATH=$(ls "$CACHE_DIR"/iso/*.iso 2>/dev/null | head -1 || true)
   [[ -n "$HOST_ISO_PATH" ]] || { log_error "No .iso found after 'oras pull $WIN11_ISO_REF'."; exit 1; }
   log_success "Win11 ISO ready: $HOST_ISO_PATH"
