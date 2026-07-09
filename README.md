@@ -159,7 +159,7 @@ is tee'd to `.logs/build-vm-<timestamp>.log`. After each run, `.logs/latest.log`
 | Flag | Meaning |
 |---|---|
 | `--unattended` | Hands-free install: auto C:/D: partitions, local admin `dev`/`dev`, Guest Additions, full toolchain. Implies `-y` (no confirmation prompt). By default stops before the clone; add `--stop-at all` for the full clone+build+run |
-| `--iso PATH` | Windows 11 ISO. Optional; auto-pulled from `ghcr.io/tcp-software/win11-iso:25h2` if omitted |
+| `--iso PATH` | Windows 11 ISO. Optional; a stock Microsoft ISO is auto-pulled from `ghcr.io/tcp-software/win11-iso:25h2` if omitted. Pass your own to skip the pull (see [Using your own ISO](#using-your-own-iso)) |
 | `--cfg PATH` | `cfg.zip` server config. Optional; auto-pulled from `ghcr.io/tcp-software/we-cfg:latest` if omitted |
 | `--gh-token TOKEN` / `--gh-user USER` | GitHub credentials for the clone and NuGet source. Required only when the build clones (`--stop-at clone` or later); auto-sourced from the `gh` login or `$GH_TOKEN`/`$GH_USER` |
 | `--aws-access-key KEY` / `--aws-secret-key SECRET` | Optional. Set as guest environment variables only. Not needed to build or run the dev server (AWS is used only by runtime features such as S3 and SES) |
@@ -346,6 +346,33 @@ other devices on the LAN — use the default host build (bridged) for real-devic
   parts; it auto-picks one next to the cache folder, avoiding a small `/tmp`.
 - If a from-scratch build aborts early during boot, check for a stale, orphaned `VBoxHeadless`
   process holding RAM (an out-of-memory abort); free that memory first.
+
+## Using Your Own ISO
+
+The ISO auto-pulled from ghcr is a **stock Microsoft Windows 11 25H2 x64 ISO** — it is *not*
+pre-patched. It's just cached there (as a private package, which is why the pull needs the GitHub
+login). All the "patching" happens at build time in the remaster step: the prompt-free boot image
+is swapped in, `autounattend.xml` is injected for the unattended install, and `install.wim` is
+split into `<4 GB` parts. The TPM / Secure Boot / RAM requirement bypass is applied by
+`autounattend.xml` + `bypass_checks.reg` at install time, not baked into the ISO.
+
+So you can bring your own Microsoft ISO:
+
+```bash
+./build-vm.sh --unattended --iso /path/to/Win11.iso
+```
+
+It works as long as the ISO is:
+
+- a standard Windows 11 **x64** ISO with the normal layout (`efi/microsoft/boot/efisys_noprompt.bin`,
+  `sources/install.wim`, `boot/etfsboot.com`) — all present on official Microsoft ISOs; the remaster
+  fails with a clear message if `efisys_noprompt.bin` is missing
+- one that includes the **Windows 11 Pro** edition (the answer file installs Pro; standard
+  multi-edition retail ISOs include it)
+
+With `--iso`, the ghcr ISO pull is skipped, so **no ghcr credentials are needed for the ISO**. (You
+still need them for `cfg.zip` unless you pass `--cfg`, and for the repo clone unless you stop at
+`--stop-at tools`.)
 
 ## Networking, Server Config, and Cache
 
