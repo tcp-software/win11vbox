@@ -265,6 +265,41 @@ default and only port 22 for SSH would be open). All four servers bind every int
 the build rewrites the other three to `0.0.0.0` so a device can reach any of them directly.
 Devices normally connect through `TerminalHubApi` (8010).
 
+### Finding a PIN-only employee to test login
+
+To sign in at the webclock or a device **without biometrics**, you need an employee that has a PIN
+set but no enrolled fingerprint/face. In the shipped test database (`Tcp70ProdTest`), employees are
+in `tcp_Employee.Employee` (`EmployeeId`, `FirstName`, `LastName`, `Pin`) and biometric enrollments
+live in `tcp_Terminal.{Cogent,Persona,SilkId}FingerprintSpec` and
+`tcp_Biometric.GenericFingerprintSpec` (linked by `EmployeeRecordId`). So *PIN-only* = a `Pin` is
+set and there is no enabled fingerprint row (and the `Biometric*ModifiedTimeUtc` columns are null).
+
+Query it in the guest. SQL Server runs in **Windows-only auth** and grants sysadmin to
+`BUILTIN\Administrators`, so run `sqlcmd` from an **elevated** shell (the "Cygwin as Admin" Windows
+Terminal profile, or an elevated `cmd`) — a non-elevated `dev` gets "Login failed":
+
+```sql
+WITH fp AS (
+  SELECT EmployeeRecordId FROM tcp_Biometric.GenericFingerprintSpec  WHERE Enabled=1
+  UNION SELECT EmployeeRecordId FROM tcp_Terminal.CogentFingerprintSpec  WHERE Enabled=1
+  UNION SELECT EmployeeRecordId FROM tcp_Terminal.PersonaFingerprintSpec WHERE Enabled=1
+  UNION SELECT EmployeeRecordId FROM tcp_Terminal.SilkIdFingerprintSpec  WHERE Enabled=1)
+SELECT c.CompanyName, e.EmployeeId, e.LastName, e.FirstName, e.Pin
+FROM tcp_Employee.Employee e
+LEFT JOIN fp ON fp.EmployeeRecordId = e.RecordId
+LEFT JOIN tcp_Company.Company c ON c.RecordId = e.CompanyRecordId
+WHERE e.IsRole = 0 AND e.Pin <> '' AND fp.EmployeeRecordId IS NULL
+  AND e.BiometricFingerprintModifiedTimeUtc IS NULL
+  AND e.BiometricFaceScanModifiedTimeUtc IS NULL
+ORDER BY c.CompanyName, e.EmployeeId;
+```
+
+Run it with `sqlcmd -S localhost -E -d Tcp70ProdTest -i query.sql`. `EmployeeId` is scoped **per
+company**, so use the ID within the company you connect to. In the current test database the
+**Webclock** company has PIN-only employees `7` (Joseph Damer), `8` (Joe Williams), and `10`
+(Heather Karnes), all with PIN `123` — a good default for a webclock login test. (Exact IDs/PINs
+depend on the `cfg.zip` database snapshot.)
+
 ## Exporting an OVA Appliance
 
 Add `--export DIR` to a build, or export a VM that is already built without rebuilding:
