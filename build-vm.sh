@@ -563,9 +563,13 @@ run_host_orchestrator() {
     _pv2="$_a"
   done
 
-  # oras + ghcr login are only needed to PULL from ghcr. Skip both when the user supplied their own
-  # ISO and cfg (so --iso doesn't require oras, ghcr auth, or a network pull at all).
-  if [[ -z "$_iso" || -z "$_cfg" ]]; then
+  # oras + ghcr login are needed to PULL from ghcr: the ISO/cfg (via oras) AND, for a container
+  # build, the vmbuilder image (via docker pull, which ghcr_login authenticates). So log in to ghcr
+  # when EITHER we still have to fetch the ISO/cfg OR this is a container build - only a host build
+  # that supplied its own ISO and cfg can skip it entirely (no ghcr access needed at all). Without
+  # this a container build with --iso + --cfg would hit an unauthenticated docker pull of the
+  # (private) vmbuilder image and fail unless the image happened to be cached locally.
+  if [[ "$NO_CONTAINER" != true || -z "$_iso" || -z "$_cfg" ]]; then
     ensure_oras
     ghcr_login
   fi
