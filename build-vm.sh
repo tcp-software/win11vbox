@@ -154,6 +154,10 @@ OPTIONS
                          Refuses to export a half-built VM.
   --export-only DIR      Skip the build; export the VM already in the running container now
                          (no readiness wait - you're asserting it's ready)
+  --sanitize             Before export, strip secrets for PUBLISHING: remove the clear-text
+                         GitHub NuGet token, then GATE (refuse to export if a GitHub token or AWS
+                         key remains). Writes a '<ova>.sanitized' marker publish-ova.sh requires.
+                         Cloned repos + the test DB are kept. Use for OVAs pushed to ghcr.
   --dry-run              Stage a marker so the in-guest tool install runs DUMMY steps (each
                          sleeps ~3s) - verifies the whole flow in minutes, no credentials
                          needed. (Formerly --test.)
@@ -719,7 +723,7 @@ HINTRO="$HREPO/assets/timelapse-install-frames"
 # container) find exits non-zero, pipefail propagates it, and the bare assignment would make
 # set -e kill the whole script here - silently, before ensure_virtualbox even runs.
 HFONT="$(find /usr/share/fonts -name 'DejaVuSans.ttf' 2>/dev/null | head -1 || true)"
-WATCH=false; EXPORT_DIR=""; EXPORT_ONLY=""; DRYRUN=false; NO_CONTAINER=true; FOLLOW=true; _pv=""
+WATCH=false; EXPORT_DIR=""; EXPORT_ONLY=""; DRYRUN=false; NO_CONTAINER=true; FOLLOW=true; SANITIZE=false; _pv=""
 for _a in "$@"; do
   case "$_pv" in
     --export)      EXPORT_DIR="$_a" ;;
@@ -734,6 +738,7 @@ for _a in "$@"; do
   [[ "$_a" == "--container" ]] && NO_CONTAINER=false
   [[ "$_a" == "--follow" ]] && FOLLOW=true
   [[ "$_a" == "--detach" || "$_a" == "--no-follow" ]] && FOLLOW=false
+  [[ "$_a" == "--sanitize" ]] && SANITIZE=true
   _pv="$_a"
 done
 # The outer orchestrator (run_host_orchestrator, follow_progress, watch_capture, wait_for_ready,
@@ -821,11 +826,50 @@ ensure_ffmpeg(){
   [[ -n "$FFMPEG" ]] && log_info "ffmpeg: $FFMPEG" || log_warn "ffmpeg unavailable - frames will be saved, but no video assembled."
 }
 
+# Strip secrets from the guest before an OVA is exported for PUBLISHING (--sanitize). The one
+# confirmed secret a --stop-at all image carries is the GitHub token: configure_credentials.cmd adds
+# the GitHub NuGet source with '--store-password-in-clear-text', so the token sits in clear text in
+# dev's NuGet.Config. (The clone scrubs the token from each repo's git remote, so .git/config is
+# already clean.) This removes that NuGet source, deletes any leftover staged cred files, then GATES:
+# it scans NuGet.Config for a token pattern and the machine environment for an AWS key, and returns
+# non-zero if either remains - so do_export refuses to produce a leaky OVA (mirrors the security gate
+# in clockware-toolchains/publish-builder.sh). Cloned repos + the test DB are intentionally kept.
+# NOTE: clearing AWS machine-env vars needs elevation (not done here); the gate merely refuses to
+# publish if they are present, which only happens when the build itself was given --aws-* keys.
+sanitize_guest_for_publish(){
+  log_info "Sanitizing guest for publish: removing the clear-text GitHub NuGet token, then gating..."
+  # One PowerShell call removes the source (deleting the clear-text token from dev's NuGet.Config)
+  # and re-scans. PowerShell (not cmd) because the dotnet path has a space, which cmd quoting
+  # mangles through guestcontrol. The gate emits 'CLEAN' or 'LEAK <what>'.
+  local scan
+  scan=$(gx guestcontrol "$HVM" --username dev --password dev run --exe 'C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe' -- \
+    powershell -NoProfile -Command "Write-Output 'gate';
+\$d='C:\Program Files\dotnet\dotnet.exe'; if(-not (Test-Path \$d)){ \$d='dotnet' };
+try { & \$d nuget remove source github_tcp 2>&1 | Out-Null } catch {};
+Remove-Item 'C:\Setup\gh_token.txt','C:\Setup\gh_user.txt','C:\Setup\aws_access_key.txt','C:\Setup\aws_secret_key.txt' -EA SilentlyContinue;
+\$hits=@();
+foreach(\$f in (\"\$env:APPDATA\NuGet\NuGet.Config\"),'C:\ProgramData\NuGet\NuGet.Config'){ if(Test-Path \$f){ if(Select-String -Path \$f -Pattern 'gh[posur]_[A-Za-z0-9]|github_pat_' -Quiet){ \$hits += ('token:'+\$f) } } };
+if((Get-ItemProperty 'HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\Environment' -EA SilentlyContinue).AWS_ACCESS_KEY_ID){ \$hits += 'aws-key:machine-env' };
+if(\$hits.Count -gt 0){ Write-Output ('LEAK '+(\$hits -join ', ')) } else { Write-Output 'CLEAN' }" 2>/dev/null | tr -d '\r' | grep -vE '^WARNING|^gate$')
+  if printf '%s\n' "$scan" | grep -q '^LEAK '; then
+    log_error "Sanitize GATE FAILED - secret(s) still in the image: $(printf '%s\n' "$scan" | sed -n 's/^LEAK //p')"
+    log_error "Refusing to export a publishable OVA. (An AWS machine-env key needs elevation to clear.)"
+    return 1
+  fi
+  [[ "$scan" == *CLEAN* ]] || { log_error "Sanitize gate did not return CLEAN (guest scan failed). Refusing to export."; return 1; }
+  log_success "Sanitize gate passed: no GitHub token or AWS key found in the image."
+  return 0
+}
+
 # Power off the existing VM, export it to an OVA, and stream-copy it to host $EXPORT_DIR
 # (the container can't see that path, so export to the overlay and copy via a helper).
 do_export(){
   local ts OVA OVERLAY
   ts="$(date +%Y%m%d-%H%M%S)"; OVA="Win11-WebEdition-${ts}.ova"; OVERLAY="/root/$OVA"
+  # --sanitize: scrub secrets + GATE before we power off/export. Abort the export if it fails.
+  if [[ "${SANITIZE:-false}" == true ]]; then
+    sanitize_guest_for_publish || { log_error "Not exporting (sanitize/gate failed)."; return 1; }
+  fi
   log_info "Exporting OVA to host:$EXPORT_DIR (powers the VM off; servers restart on the next boot)"
   gx controlvm "$HVM" acpipowerbutton >/dev/null 2>&1 || true
   for _ in $(seq 1 40); do [[ "$(gx showvminfo "$HVM" --machinereadable 2>/dev/null | sed -n 's/^VMState=//p' | tr -d '"')" == poweroff ]] && break; sleep 6; done
@@ -836,6 +880,7 @@ do_export(){
     mkdir -p "$EXPORT_DIR"
     gx export "$HVM" -o "$EXPORT_DIR/$OVA" --vsys 0 --product "TCP Win11 Dev VM ($ts)" || { log_error "export failed"; return 1; }
     chmod 644 "$EXPORT_DIR/$OVA" 2>/dev/null || true
+    write_publish_marker "$EXPORT_DIR/$OVA"
     log_success "OVA: $EXPORT_DIR/$OVA ($(du -h "$EXPORT_DIR/$OVA" 2>/dev/null | cut -f1))"
     return 0
   fi
@@ -847,7 +892,17 @@ do_export(){
   docker exec ova_dest sh -lc "chmod 644 /out/'$OVA'; ls -lh /out/'$OVA'"
   docker exec "$HC" rm -f "$OVERLAY" 2>/dev/null || true
   docker rm -f ova_dest >/dev/null 2>&1 || true
+  write_publish_marker "$EXPORT_DIR/$OVA"
   log_success "OVA: $EXPORT_DIR/$OVA"
+}
+
+# When --sanitize produced this OVA, drop a sidecar '<ova>.sanitized' next to it. publish-ova.sh
+# REQUIRES this marker before it will push, so an un-sanitized OVA can never be published by accident.
+write_publish_marker(){
+  [[ "${SANITIZE:-false}" == true ]] || return 0
+  printf 'sanitized+gated by build-vm.sh --sanitize at %s\n' "$(date -u +%FT%TZ)" > "$1.sanitized" 2>/dev/null \
+    && log_info "Wrote publish marker: $(basename "$1").sanitized" \
+    || log_warn "could not write publish marker next to $1"
 }
 
 # Block until the in-guest build is FULLY done before exporting: repos cloned, the server

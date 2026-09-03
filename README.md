@@ -314,6 +314,36 @@ folder. For the default host build that's a direct export; a `--container` build
 container and stream-copies the OVA out. The OVA imports into any VirtualBox through
 File > Import Appliance.
 
+## Publishing the OVA to GHCR
+
+An OVA is **not** pushed anywhere by default (`--export` is local only). To host it on ghcr, use the
+publish flow — but note a `--stop-at all` image carries a **secret**: `configure_credentials.cmd`
+adds the GitHub NuGet source with `--store-password-in-clear-text`, so the GitHub token sits in
+clear text in dev's `NuGet.Config`. (The clone scrubs the token from each repo's git remote, so
+`.git/config` is clean.) Publishing must strip that first.
+
+- **`build-vm.sh --sanitize`** — before export, removes the GitHub NuGet source (deleting the
+  clear-text token), then **gates**: it re-scans `NuGet.Config` for a token and the machine
+  environment for an AWS key, and **refuses to export** if either remains. On success it writes a
+  `<ova>.sanitized` marker next to the OVA. Cloned repos + the test DB are kept.
+- **`publish-ova.sh`** — pushes the OVA to `ghcr.io/tcp-software/win11-ova:<tag>` via `oras`, and
+  **refuses to push** unless the `<ova>.sanitized` marker is present. So an un-sanitized OVA can't
+  leak the token by accident (this mirrors the secret gate in `clockware-toolchains`). Needs a GHCR
+  **PAT** (`GHCR_USER` + `GHCR_PAT`; `GH_TOKEN` accepted) — the gh OAuth token is rejected by GHCR.
+- **`Jenkinsfile`** — a pipeline (mirroring `clockware-toolchains`) that builds with `--sanitize`,
+  then publishes when `PUBLISH` is true, using the `tcp-ci` Secret-text credential for both the
+  clone and the push.
+
+```bash
+# build a publishable (sanitized, gated) OVA, then push it
+./build-vm.sh --unattended --container --stop-at all --clean \
+    --iso <iso> --cfg <cfg> --export /data/win11vbox-vm --sanitize
+GHCR_USER=oosman-tcps GHCR_PAT=<pat> ./publish-ova.sh          # gate + oras push
+```
+
+Heads-up: the OVA is ~80 GB, so a push over a slow/flaky uplink can take **hours** — publish from a
+host (or CI agent) with a fast, stable connection.
+
 ## Launching the VM (bridged, hardened)
 
 The default host build already runs bridged. `launch-vm.sh` is for *running* a VM registered on
