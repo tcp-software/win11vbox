@@ -1486,6 +1486,16 @@ BEGIN
   CREATE LOGIN [Q3WShUtj8K] WITH PASSWORD='Q3WShUtj8K', CHECK_POLICY=OFF, CHECK_EXPIRATION=OFF;
 END
 GO
+-- tcadmin is the login a test runner uses to restore a database over the network
+-- (scripts/dbRestore/restoreDb.sh in tcp-tl-70). RESTORE DATABASE, ALTER DATABASE
+-- ... SET SINGLE_USER and CREATE PROCEDURE all need elevated rights, so grant
+-- sysadmin. Fine on a disposable QA VM; scope it down if these VMs ever hold
+-- anything real. Idempotent - ADD MEMBER on an existing member is a no-op.
+IF IS_SRVROLEMEMBER('sysadmin', 'tcadmin') = 0
+BEGIN
+  ALTER SERVER ROLE sysadmin ADD MEMBER [tcadmin];
+END
+GO
 EOF
 
 cat > "${VM_DIR}/run_sql_logins.cmd" <<'EOF'
@@ -2087,6 +2097,28 @@ rem sqlcmd ships under the SQL Client SDK ODBC Binn, in a version-named dir (glo
 echo post_build: creating SQL logins... >> "%LOG%"
 rem sqlcmd ships with the SQL Client SDK but isn't on PATH; find and use its full path.
 for /d %%v in ("C:\Program Files\Microsoft SQL Server\Client SDK\ODBC\*") do if exist "%%v\Tools\Binn\SQLCMD.EXE" set "SQLCMD=%%v\Tools\Binn\SQLCMD.EXE"
+rem --- Create a writable SMB share for database backups.
+rem A test runner restoring a database (scripts/dbRestore/restoreDb.sh in tcp-tl-70) has to put
+rem the .bak somewhere SQL Server can read it, because SQL Server can only RESTORE from its own
+rem filesystem. Without a dedicated share the only options are the default admin shares (C$/D$),
+rem which need an admin logon over SMB. This creates D:\MSSQL\Backup and shares it as 'Backups',
+rem matching the REMOTE_SHARE_NAME / REMOTE_WINDOWS_BAK_DIR defaults in that script's
+rem .config.example. Idempotent - 'net share' on an existing share is a harmless error.
+echo post_build: creating the Backups SMB share for database restores... >> "%LOG%"
+if not exist "D:\MSSQL\Backup" mkdir "D:\MSSQL\Backup" >> "%LOG%" 2>&1
+net share Backups >nul 2>&1 || net share Backups="D:\MSSQL\Backup" /GRANT:dev,FULL >> "%LOG%" 2>&1
+
+rem --- Enable MIXED-MODE authentication before creating the SQL logins.
+rem SQL Server installs Windows-authentication-only (LoginMode=1), which makes the
+rem tcadmin / Q3WShUtj8K logins below unusable: they are created successfully and then
+rem every connection is refused with "Login failed for user". A test runner reaching this
+rem VM over the network cannot use Windows auth, so it needs SQL auth to work at all.
+rem LoginMode only takes effect on service restart, hence the net stop/start.
+echo post_build: enabling SQL Server mixed-mode authentication... >> "%LOG%"
+reg add "HKLM\SOFTWARE\Microsoft\Microsoft SQL Server\MSSQL16.MSSQLSERVER\MSSQLServer" /v LoginMode /t REG_DWORD /d 2 /f >> "%LOG%" 2>&1
+net stop MSSQLSERVER /y >> "%LOG%" 2>&1
+net start MSSQLSERVER >> "%LOG%" 2>&1
+
 if defined SQLCMD ( if exist "%HERE%create_sql_logins.sql" "%SQLCMD%" -S localhost -E -i "%HERE%create_sql_logins.sql" >> "%LOG%" 2>&1 ) else ( echo post_build: sqlcmd not found - skipping SQL logins >> "%LOG%" )
 echo post_build: scaffolding nginx... >> "%LOG%"
 "!BASH!" -lc "/cygdrive/c/Setup/setup_nginx.sh" >> "%LOG%" 2>&1
@@ -2121,6 +2153,14 @@ rem all four servers bind all interfaces (see setup_server_cfg.sh - ApiServerHos
 rem device can reach any of them directly. Idempotent (keyed by rule name).
 echo post_build: opening firewall for WebEdition ports (8008/8010/8012/8014)... >> "%LOG%"
 powershell -NoProfile -ExecutionPolicy Bypass -Command "if (-not (Get-NetFirewallRule -Name TCPWebEdition -ErrorAction SilentlyContinue)) { New-NetFirewallRule -Name TCPWebEdition -DisplayName 'TCP WebEdition servers' -Enabled True -Direction Inbound -Protocol TCP -Action Allow -LocalPort 8008,8010,8012,8014 }" >> "%LOG%" 2>&1
+
+rem --- Open inbound TCP for SQL Server (1433) and SMB (445). Both listen on 0.0.0.0 already,
+rem but Windows Firewall drops them from off-box, so they appear closed to anything but the
+rem guest itself. A test runner restoring a database needs both: SMB to copy the .bak onto the
+rem SQL Server host (SQL Server can only RESTORE from its own filesystem) and 1433 for sqlcmd.
+rem See scripts/dbRestore/restoreDb.sh in tcp-tl-70. Idempotent (keyed by rule name).
+echo post_build: opening firewall for SQL Server (1433) and SMB (445)... >> "%LOG%"
+powershell -NoProfile -ExecutionPolicy Bypass -Command "if (-not (Get-NetFirewallRule -Name TCPSqlSmb -ErrorAction SilentlyContinue)) { New-NetFirewallRule -Name TCPSqlSmb -DisplayName 'TCP SQL Server + SMB (test runner)' -Enabled True -Direction Inbound -Protocol TCP -Action Allow -LocalPort 1433,445 }" >> "%LOG%" 2>&1
 if /i "%STOPAT%"=="cfg" goto :stopped
 
 rem --- Auto-start the SELECTED WebEdition servers on EVERY boot (persistent) via a scheduled task
