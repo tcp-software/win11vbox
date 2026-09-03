@@ -8,8 +8,17 @@
 pipeline {
     agent { label 'Win11-Build-Machine' }
 
+    parameters {
+        // Empty = a tiny text file (seconds). Set to e.g. 80G to test a large push matching the real
+        // OVA -- run this ONLY on a fast, STABLE uplink: oras uploads a blob as ONE non-resumable
+        // request, so any network drop restarts the whole upload from zero.
+        string(name: 'SMOKE_SIZE', defaultValue: '',
+               description: 'Dummy artifact size (e.g. 80G to match the OVA). Empty = tiny file. Big sizes need a fast, stable link.')
+    }
+
     options {
-        timeout(time: 15, unit: 'MINUTES')
+        // A tiny push is seconds; an 80 GB push can be a long haul even on a good link.
+        timeout(time: 8, unit: 'HOURS')
     }
 
     environment {
@@ -24,7 +33,7 @@ pipeline {
         stage('Smoke: publish a dummy artifact to GHCR') {
             steps {
                 withCredentials([string(credentialsId: 'tcp-ci', variable: 'GHCR_PAT')]) {
-                    sh 'GHCR_USER="${GHCR_USER}" ./smoke-publish.sh'
+                    sh 'GHCR_USER="${GHCR_USER}" SMOKE_SIZE="${SMOKE_SIZE}" ./smoke-publish.sh'
                 }
             }
         }

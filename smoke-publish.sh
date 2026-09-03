@@ -41,12 +41,24 @@ GHCR_USER="${GHCR_USER:-}"; GHCR_PAT="${GHCR_PAT:-${GH_TOKEN:-}}"
 [ -n "$GHCR_PAT" ]  || { read -rsp "GHCR token: " GHCR_PAT; echo; }
 [ -n "$GHCR_USER" ] && [ -n "$GHCR_PAT" ] || fail "GHCR username and token are required."
 
-# --- 1. tiny dummy artifact ---
-WORK="$(mktemp -d)"; trap 'rm -rf "$WORK"' EXIT
-FILE="smoke-test.txt"
-printf 'ghcr publish smoke test\n  when: %s\n  host: %s\n  by:   %s\n' \
-  "$(date -u +%FT%TZ)" "$(hostname 2>/dev/null || echo ?)" "$GHCR_USER" > "$WORK/$FILE"
-echo ">> dummy artifact ($(wc -c < "$WORK/$FILE") bytes):"; sed 's/^/     /' "$WORK/$FILE"
+# --- 1. dummy artifact ---
+# SMOKE_SIZE (e.g. 80G) makes a sparse dummy of that size to test a large-artifact push -- meant to
+# match the real OVA (~80 GB) and to be run on a fast-uplink agent. Default is a tiny text file.
+# SMOKE_WORK picks a roomy dir for the (sparse) file and any pull-back; default /data then /tmp.
+: "${SMOKE_SIZE:=}"
+SMOKE_WORK="${SMOKE_WORK:-$( [ -d /data ] && [ -w /data ] && echo /data || echo /tmp )}"
+WORK="$(mktemp -d "${SMOKE_WORK%/}/smoke.XXXXXX")"; trap 'rm -rf "$WORK"' EXIT
+if [ -n "$SMOKE_SIZE" ]; then
+  FILE="dummy-${SMOKE_SIZE}.bin"; MEDIA="application/octet-stream"; LARGE=1
+  echo ">> creating a ${SMOKE_SIZE} sparse dummy at $WORK/$FILE (reads as zeros; uploads full size)..."
+  truncate -s "$SMOKE_SIZE" "$WORK/$FILE" || fail "could not create a ${SMOKE_SIZE} file (disk/space?)."
+  echo ">> apparent size: $(du -h --apparent-size "$WORK/$FILE" | cut -f1) (on-disk: $(du -h "$WORK/$FILE" | cut -f1))"
+else
+  FILE="smoke-test.txt"; MEDIA="text/plain"; LARGE=0
+  printf 'ghcr publish smoke test\n  when: %s\n  host: %s\n  by:   %s\n' \
+    "$(date -u +%FT%TZ)" "$(hostname 2>/dev/null || echo ?)" "$GHCR_USER" > "$WORK/$FILE"
+  echo ">> dummy artifact ($(wc -c < "$WORK/$FILE") bytes):"; sed 's/^/     /' "$WORK/$FILE"
+fi
 
 # --- 2. login ---
 echo ">> logging in to ${REGISTRY} as ${GHCR_USER} (token ****${GHCR_PAT: -4})..."
@@ -54,16 +66,23 @@ printf '%s' "$GHCR_PAT" | oras login "$REGISTRY" -u "$GHCR_USER" --password-stdi
   || fail "oras login failed (bad PAT, or the token lacks package scopes)."
 
 # --- 3. push ---
-echo ">> pushing to ${SMOKE_REF} ..."
-( cd "$WORK" && oras push "$SMOKE_REF" --artifact-type application/vnd.tcp.smoketest "${FILE}:text/plain" ) \
-  || fail "oras push failed (write:packages scope? repo perms? network?)."
+echo ">> pushing ${FILE} to ${SMOKE_REF} ..."
+[ "${LARGE:-0}" = 1 ] && echo "   (~${SMOKE_SIZE}; a single blob -- see the note below on no-resume; this can take a long time)"
+( cd "$WORK" && oras push "$SMOKE_REF" --artifact-type application/vnd.tcp.smoketest "${FILE}:${MEDIA}" ) \
+  || fail "oras push failed (write:packages scope? repo perms? size limit? network reset?)."
 
-# --- 4. verify by pulling it back ---
-echo ">> pulling it back to verify ..."
-mkdir -p "$WORK/pulled"
-( cd "$WORK/pulled" && oras pull "$SMOKE_REF" ) || fail "oras pull failed (pushed but not retrievable)."
-diff -q "$WORK/$FILE" "$WORK/pulled/$FILE" >/dev/null 2>&1 || fail "round-trip mismatch (pulled file differs)."
-echo ">> round-trip OK (pushed == pulled)."
+# --- 4. verify ---
+if [ "${LARGE:-0}" = 1 ]; then
+  echo ">> verifying the pushed manifest (skipping a ${SMOKE_SIZE} pull-back) ..."
+  oras manifest fetch "$SMOKE_REF" >/dev/null 2>&1 || fail "pushed but manifest not retrievable."
+  echo ">> manifest present in the registry -- the ${SMOKE_SIZE} artifact was accepted."
+else
+  echo ">> pulling it back to verify ..."
+  mkdir -p "$WORK/pulled"
+  ( cd "$WORK/pulled" && oras pull "$SMOKE_REF" ) || fail "oras pull failed (pushed but not retrievable)."
+  diff -q "$WORK/$FILE" "$WORK/pulled/$FILE" >/dev/null 2>&1 || fail "round-trip mismatch (pulled file differs)."
+  echo ">> round-trip OK (pushed == pulled)."
+fi
 
 # --- 5. clean up: delete the whole throwaway package (best-effort; needs delete:packages) ---
 # Delete the PACKAGE, not the single version: GitHub returns HTTP 400 when you try to delete a
