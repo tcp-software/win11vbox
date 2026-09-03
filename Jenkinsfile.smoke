@@ -1,0 +1,36 @@
+// Jenkinsfile.smoke -- GHCR publish SMOKE TEST. Pushes a tiny dummy artifact to ghcr and pulls it
+// back, to validate the credential + oras + push plumbing BEFORE running the real (multi-hour,
+// ~80 GB) build+publish pipeline in the main Jenkinsfile. Point a throwaway Jenkins job at this
+// file; if it goes green, the GHCR path (PAT scope, oras, network) works.
+//
+// Uses the same 'tcp-ci' GHCR PAT credential and account (oosman-tcps) as the real pipeline.
+
+pipeline {
+    agent { label 'Win11-Build-Machine' }
+
+    options {
+        timeout(time: 15, unit: 'MINUTES')
+    }
+
+    environment {
+        GHCR_USER = 'oosman-tcps'
+    }
+
+    stages {
+        stage('Checkout') {
+            steps { checkout scm }
+        }
+
+        stage('Smoke: publish a dummy artifact to GHCR') {
+            steps {
+                withCredentials([string(credentialsId: 'tcp-ci', variable: 'GHCR_PAT')]) {
+                    sh 'GHCR_USER="${GHCR_USER}" ./smoke-publish.sh'
+                }
+            }
+        }
+    }
+
+    post {
+        always { cleanWs() }
+    }
+}
