@@ -154,11 +154,12 @@ flowchart TD
     P0["<b>Phase 0</b> — Groundwork — ✅ DONE<br/>webeditionbuilder image · gate PASS"]:::done
     P1["<b>Phase 1</b> — Database pod — ✅ DONE<br/>Tcp70ProdTest from source (v6 seed + Wine migration) · gate PASS"]:::done
     P2["<b>Phase 2</b> — AppServerApi pod — ✅ DONE<br/>.NET 10 on aspnet:10.0, live SQL session proven · gate PASS"]:::done
-    P3["<b>Phase 3</b> — Port legacy servers (dev lift) — ▶ now<br/>TerminalHub → Adm → Workstation"]:::lift
-    P4["<b>Phase 4</b> — Pod assembly + clock connectivity<br/>compose → k8s · serverUrl → :8010"]:::now
+    P3["<b>Phase 3</b> — Clock connectivity e2e — ✅ DONE<br/>scripted clock → AppServerApi :8008 → SQL · gate PASS"]:::done
+    P4["<b>Phase 4</b> — Pod assembly + clock connectivity — ▶ now<br/>compose → k8s · serverUrl → :8008"]:::now
     P5["<b>Phase 5</b> — CI/CD, publish, docs, cutover"]:::base
+    P6["<b>Phase 6</b> — Port legacy servers (deferred dev lift)<br/>TerminalHub → Adm → Workstation"]:::lift
 
-    P0 --> P1 --> P2 --> P3 --> P4 --> P5
+    P0 --> P1 --> P2 --> P3 --> P4 --> P5 --> P6
 ```
 
 Green = achievable with existing pieces; red = genuine development (the .NET Framework → .NET port).
@@ -176,12 +177,15 @@ flowchart TD
     classDef ph fill:#e8f5e9,stroke:#2e7d32,color:#1b5e20;
     classDef t  fill:#e3f2fd,stroke:#1565c0,color:#0d47a1;
 
-    P0["Phase 0"]:::ph --> T0["tests/phase0-builder-smoke.sh<br/>tools + versions present"]:::t
-    T0 --> P1["Phase 1"]:::ph --> T1["tests/phase1-db.sh<br/>DBs built from source · logins · seeded rows"]:::t
-    T1 --> P2["Phase 2"]:::ph --> T2["tests/phase2-appserver.sh<br/>:8008 up · API→DB round-trip"]:::t
-    T2 --> P3["Phase 3"]:::ph --> T3["tests/phase3-hubs.sh + phase3-clock-e2e.sh<br/>hubs on Kestrel · clock registers + punches"]:::t
-    T3 --> P4["Phase 4"]:::ph --> T4["tests/phase4-pod-e2e.sh<br/>whole pod up · device→:8010→DB e2e"]:::t
+    classDef done fill:#c8e6c9,stroke:#1b5e20,color:#1b5e20,stroke-width:2px;
+
+    P0["Phase 0 ✅"]:::done --> T0["tests/phase0-builder-smoke.sh<br/>tools + versions present — PASS"]:::t
+    T0 --> P1["Phase 1 ✅"]:::done --> T1["tests/phase1-db.sh<br/>DB from source · logins · 607 employees — PASS"]:::t
+    T1 --> P2["Phase 2 ✅"]:::done --> T2["tests/phase2-appserver.sh<br/>:8008 up · live SQL session — PASS"]:::t
+    T2 --> P3["Phase 3 ✅"]:::done --> T3["tests/phase3-clock-e2e.sh<br/>clock → :8008 → SQL: register + auth — PASS"]:::t
+    T3 --> P4["Phase 4"]:::ph --> T4["tests/phase4-pod-e2e.sh<br/>whole pod up · device→:8008→DB e2e"]:::t
     T4 --> P5["Phase 5"]:::ph --> T5["CI runs every gate on a clean checkout"]:::t
+    T5 --> P6["Phase 6"]:::ph --> T6["tests/phase6-hubs.sh<br/>ported legacy servers on Kestrel (deferred)"]:::t
 ```
 
 ### Phase 0 — Groundwork
@@ -291,7 +295,36 @@ flowchart TD
   container's hostname, `program_name` = `TimeClock Plus`, database `Tcp70ProdTest`. Fails fast (with
   the container's last log lines) if it exits or the DB is unreachable. Non-zero on any miss.
 
-### Phase 3 — Port the legacy servers ⚠️ (the development lift) — ▶ in progress (TerminalHubApi first)
+### Phase 3 — Clock connectivity e2e ✅ DONE — `tests/phase3-clock-e2e.sh` PASS
+- **Goal:** prove a real clock works against the **Linux** stack end-to-end — the core migration thesis —
+  with no Windows VM. Since the clock's endpoint is **AppServerApi (:8008)** (already on Linux from
+  Phase 2), this needs no server porting.
+- **What was built:** `docker/clock-e2e/` — a `net10.0` scripted standalone clock that **reuses the real
+  `Tcp.Proxy.AbstractProxy` + `Tcp.Presentation.Model.LogOnData`**, so its JSON/session/header behavior is
+  identical to the shipping clock and integration tests (no re-derivation). Built inside `webeditionbuilder`
+  (SDK 10, cached `~/.nuget`). It drives the exact `tcp-tl-70` `RequestUrls.h` sequence against `:8008`:
+  1. `userSessions/0/AcceptEulaAndLogOn` (ADMIN, blank pw, ns `PROD`, company 500) — first login returns
+     `202 {IntType:20,"must accept EULA"}`, so the EULA-accepting variant is used → **session issued**.
+  2. `terminalSpecifications/0/RegisterStandaloneTerminal?...` (`Standalone-Id` header) → **`true`**.
+  3. `terminalSpecifications/0/GetStandaloneSpecs?companyNamespace=PROD` → snapshot with **`TerminalId`**.
+  4. `employeeSessions/{terminalId}/TerminalLogOnAndStart?clockOperationType=7` (employee 1) → **employee
+     session** + the clock workflow starts.
+- **Acceptance — `docker/tests/phase3-clock-e2e.sh` (CI gate) — ✅ PASS:** the client reaches `E2E-OK`
+  (all four steps returned success against Linux `:8008`), then `go-sqlcmd` verifies: (a) a valid **user
+  session** (auth read through to SQL); (b) the **committed clock→server→DB write** — the
+  `tcp_Company.StandaloneTerminal` registration row is present in `Tcp70ProdTest`; (c) **specs served from
+  SQL** (a real `TerminalId`); (d) **employee terminal auth** issued a session for company 500 employee 1
+  (Len Potts), i.e. the employee identity was resolved in SQL through the terminal endpoint.
+- **Scope note (honest):** the employee punch **authenticates and starts** the clock operation, but a
+  fully-**committed `WorkSegment`** requires the company's multi-step confirm chain
+  (`SubmitJobCode`/`SubmitCostCode`/`SubmitTrackedFields`/`Confirm…`) — client plumbing that the server
+  defers/rolls back until completed. That belongs to the Phase 4 pod e2e (from outside the pod) or a richer
+  client; it is not a Linux-portability question. See memory `clock-talks-to-appserver-8008`.
+
+### Phase 6 — Port the legacy servers ⚠️ (deferred dev lift; scheduled after Phases 4–5)
+> Moved to the end by decision: the clock talks to AppServerApi (:8008), so these servers are **off the
+> clock's critical path**. Port them only after pod assembly (P4), CI/CD (P5) — or sooner if a needed
+> admin/aux feature requires one. Sizing notes below were captured during Phase 3.
 - **Goal:** `TerminalHubApi`, `AdmServerApi`, `WorkstationHubApi` build + run on Linux.
 - **Sizing findings (TerminalHubApi):**
   - It is a **legacy-style** csproj (`ToolsVersion 4.0`, `v4.7.2`) on **Web API 2** (`Microsoft.AspNet.WebApi.Core`,
@@ -331,17 +364,10 @@ flowchart TD
      **WorkstationHubApi** — native `SQLite.Interop.dll` → `Microsoft.Data.Sqlite`; **AdmServerApi** —
      `Asterisk.NET`/telephony.
   4. Add each to the compose/pod once green.
-- **Acceptance — `tests/phase3-clock-e2e.sh` + `tests/phase3-hubs.sh` (CI gate):**
-  `phase3-clock-e2e.sh` is the **clock-connectivity proof the whole initiative is about**, and — since
-  the clock's endpoint is **AppServerApi (:8008)**, already running from Phase 2 — it is runnable *now*:
-  drive a scripted client (the exact `tcp-tl-70` request URLs from `common/Requests/RequestUrls.h`) with
-  `serverUrl=…:8008` through auto-registration (`IsStandaloneTerminalRegistered` →
-  `RegisterStandAloneTerminal?standAloneTerminalName=…` → `GetStandaloneSpecs`) and a **clock punch**
-  (`clockOperation` `StartQuickPunch`/`StartClockIn` under an employee session), with the `Standalone-Id`
-  header, then assert the registration + punch **landed in the DB** (a `go-sqlcmd` row check).
-  `phase3-hubs.sh` asserts each *ported* legacy server (TerminalHubApi admin proxy 8010, AdmServerApi
-  8012, WorkstationHubApi 8014) **builds with `dotnet` on Linux**, starts under Kestrel, and answers on
-  its port. Non-zero if the clock e2e doesn't reach the DB or any ported server fails to build/start.
+- **Acceptance — `tests/phase6-hubs.sh` (CI gate):** asserts each *ported* legacy server (TerminalHubApi
+  admin proxy 8010, AdmServerApi 8012, WorkstationHubApi 8014) **builds with `dotnet` on Linux**, starts
+  under Kestrel, and answers a health/version call on its port. Non-zero if any ported server fails to
+  build or start. (The clock-connectivity e2e is Phase 3, already green.)
 
 ### Phase 4 — Pod assembly + clock connectivity
 - **Goal:** a single deployable pod, reachable by devices.
@@ -350,8 +376,9 @@ flowchart TD
   reachability, TLS: `shouldSkipSslValidation` or a pinned self-signed CA for dev).
 - **Acceptance — `tests/phase4-pod-e2e.sh` (CI gate):** bring the whole stack up (`docker compose up
   -d` or `kubectl apply`, then wait-for-ready on every service), assert all intended ports are
-  reachable (8008/8010/8012/8014, and 1433 as scoped), run the **full clock e2e from outside the
-  pod** (register + punch + read-back through `:8010`→app→SQL), then tear down. Self-contained
+  reachable (**8008** for the clock, plus 8010/8012/8014 once Phase 6 lands, and 1433 as scoped), run the
+  **full clock e2e from outside the pod** — reuse `docker/clock-e2e` (register + auth via `:8008`→app→SQL;
+  optionally complete the punch confirm chain for a committed `WorkSegment`), then tear down. Self-contained
   (up → wait → assert → down); non-zero on any failure.
 
 ### Phase 5 — CI/CD, publish, docs, cutover
@@ -391,10 +418,10 @@ in §5), green in CI — not by manual inspection.
 
 - **Milestone A (quick win):** Phases 0–2 — a Linux pod hosting the **databases + AppServerApi**,
   built by `webeditionbuilder`, reproducible from a clean checkout. _No physical clock yet._
-- **Milestone B (clock-capable):** Phase 3 for **TerminalHubApi** — a linclock/clock registers and
-  clocks in against the pod on `:8010`.
-- **Milestone C (full parity):** Phases 3–5 — all four servers on Linux, pod deployable to k8s,
-  CI-published, VM demoted to fallback.
+- **Milestone B (clock-capable):** ✅ **reached** — Phase 3 clock e2e: a scripted standalone clock
+  registers and authenticates against the Linux **AppServerApi (:8008)** with the result in SQL.
+- **Milestone C (full parity):** Phases 4–6 — pod deployable to k8s, CI-published, the legacy
+  admin/aux servers (TerminalHub/Adm/Workstation) also on Linux, VM demoted to fallback.
 
 **Recommended first step after approval:** Phase 0 + Phase 1 (the database pod) — lowest risk, highest
 immediate value, and it unblocks everything else.
