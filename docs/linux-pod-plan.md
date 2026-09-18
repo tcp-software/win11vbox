@@ -149,8 +149,8 @@ flowchart TD
 
     P0["<b>Phase 0</b> — Groundwork — ✅ DONE<br/>webeditionbuilder image · gate PASS"]:::done
     P1["<b>Phase 1</b> — Database pod — ✅ DONE<br/>Tcp70ProdTest from source (v6 seed + Wine migration) · gate PASS"]:::done
-    P2["<b>Phase 2</b> — AppServerApi pod — ▶ now<br/>.NET 10 / Kestrel"]:::now
-    P3["<b>Phase 3</b> — Port legacy servers (dev lift)<br/>TerminalHub → Adm → Workstation"]:::lift
+    P2["<b>Phase 2</b> — AppServerApi pod — ✅ DONE<br/>.NET 10 on aspnet:10.0, live SQL session proven · gate PASS"]:::done
+    P3["<b>Phase 3</b> — Port legacy servers (dev lift) — ▶ now<br/>TerminalHub → Adm → Workstation"]:::lift
     P4["<b>Phase 4</b> — Pod assembly + clock connectivity<br/>compose → k8s · serverUrl → :8010"]:::now
     P5["<b>Phase 5</b> — CI/CD, publish, docs, cutover"]:::base
 
@@ -259,15 +259,33 @@ flowchart TD
   both biometric timestamps NULL) → 8 rows; (e) **no pre-built backup was RESTOREd** —
   `msdb.dbo.restorehistory` for `Tcp70ProdTest` → 0. Non-zero exit on any miss.
 
-### Phase 2 — AppServerApi pod ✅
+### Phase 2 — AppServerApi pod ✅ DONE — `tests/phase2-appserver.sh` PASS
 - **Goal:** the .NET 10 app server running on Linux, talking to the DB pod.
-- **Steps:** use `docker/app.Dockerfile` (Node client build + `dotnet publish`); **bump base images
-  8.0 → 10.0** to match `net10.0`; mount `cfg` with `TCPCONN.XML` → `ServerName=mssql`, `Port=1433`,
-  `Integrated=false` (already SQL-auth); expose 8008.
-- **Acceptance — `tests/phase2-appserver.sh` (CI gate):** wait for the `AppServerApi` container
-  healthy, then assert: (a) a health/version endpoint on `:8008` returns 200; (b) an API call that
-  reads **through to SQL** returns expected data (proves app→DB wiring against the Phase-1 DB); (c) it
-  fails fast if the container exits or the DB is unreachable. Non-zero on any failure.
+- **Steps (as executed):**
+  1. **Publish from source inside `webeditionbuilder`** (it already carries .NET SDK 10 — no
+     `mcr.microsoft.com/dotnet/sdk:10.0` pull on this host's slow uplink) with a **persistent host NuGet
+     cache**: mount the *whole* `~/.nuget` → `/home/dev/.nuget` (mounting only `packages` makes Docker
+     root-create the parent and every restore fails on an unwritable `NuGet.Config`). 169 files,
+     `Tcp.AppServerApi.dll`, 0 errors. No private NuGet packages in this project graph.
+  2. **Runtime image** `docker/appserver.runtime.Dockerfile`: `aspnet:10.0` + the publish output, non-root
+     `appuser`, `ENTRYPOINT dotnet Tcp.AppServerApi.dll /app/cfg .` (same contract as `docker/start.sh`).
+     The full `app.Dockerfile` (Node client + nginx + New Relic) is Phase 4 pod-assembly scope; its
+     `DOTNET_VERSION` default still needs the 8.0 → 10.0 bump.
+  3. **Config**: `docker/_appcfg/` = `cfg-docker/backend-configs` with `TCPCONN.XML` →
+     `ServerName=we-mssql` (SQL auth, `Q3WShUtj8K`, `Integrated=false`). Runtime overrides via the
+     `TCP_CORE_` env prefix (`Program.InitializeHost` → `AddEnvironmentVariables("TCP_CORE_")`):
+     `HttpSection__ApiServerHost=0.0.0.0`, `ApiServerPort=8008`, `EnableServerHealthCheckEndpoint=true`.
+     Remote DynamoDB app-config stays off (`ENV_APP_CONFIG_*` unset); Redis unset → in-memory cache.
+  4. Launcher `docker/run-appserver.sh`; the container joins `we-net` and reaches the DB by name.
+  - **Observation (not a Linux defect):** controllers return `HttpResponseMessage`, which ASP.NET Core
+    MVC serializes as the message *object* (and logs an `XmlSerializer` WARN). This is the codebase's
+    existing behavior on Core; verify parity against the VM in the Phase 4 e2e.
+- **Acceptance — `docker/tests/phase2-appserver.sh` (CI gate) — ✅ PASS (4/4):** (a) container running
+  and `:8008` answering (21 s cold start); (b) `GET api/v0000/ServerHealthCheck/0/GetAllNamespaceStatuses`
+  → 200 with a JSON body; (c) container still running after the calls; (d) **definitive app→DB proof:**
+  `sys.dm_exec_sessions` on the mssql container shows a live user session whose `host_name` is the app
+  container's hostname, `program_name` = `TimeClock Plus`, database `Tcp70ProdTest`. Fails fast (with
+  the container's last log lines) if it exits or the DB is unreachable. Non-zero on any miss.
 
 ### Phase 3 — Port the legacy servers ⚠️ (the development lift)
 - **Goal:** `TerminalHubApi`, `AdmServerApi`, `WorkstationHubApi` build + run on Linux.
