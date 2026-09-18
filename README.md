@@ -17,7 +17,26 @@ repositories, build the server and client, restore a test database, apply the se
 start the runtime servers on every boot. You can also stop at any intermediate stage (see
 [Build stages](#build-stages)). It can export the finished VM as a portable OVA appliance.
 
-This file is the single source of truth; it replaces the older setup guides.
+This file is the single source of truth for the automated build; it distills the manual setup
+guides in [`docs/`](#source-guides-docs), which `build-vm.sh` automates step for step.
+
+## Source Guides (`docs/`)
+
+`build-vm.sh` is an automation of TCP's manual dev-VM setup guides. Those guides live in
+[`docs/`](docs/) (as Markdown with their screenshots, plus the original PDFs); when the code says
+"per the guide", this is what it means. Read them for the *why* behind a step, or to do it by hand.
+
+| Doc (`docs/`) | What it covers |
+|---|---|
+| [`VE-TimeClock Plus Server on a Windows 11 VM-110626-171548.md`](docs/VE-TimeClock%20Plus%20Server%20on%20a%20Windows%2011%20VM-110626-171548.md) | **The primary guide** — the full manual Win11-VM build: partitions, unattended Windows, toolchain, clone, server build, DB restore, starting the servers. |
+| [`VE-TimeClock Plus Server on a Windows 11 VM (Updated).md`](docs/VE-TimeClock%20Plus%20Server%20on%20a%20Windows%2011%20VM%20%28Updated%29.md) | **2026 addendum** (this wins where it differs): Visual Studio 2026 (replaces 2022), the .NET 10 SDK, `MSBUILD_PATH` → the VS 18 path, the four servers on ports 8008/8010/8012/8014, per-server `cfg` dirs, the .NET 10 namespace-stripping, and the elevated DB restore. |
+| [`VE-Rollout plan for .NET 10 - for Dev-110626-171557.md`](docs/VE-Rollout%20plan%20for%20.NET%2010%20-%20for%20Dev-110626-171557.md) | The **.NET 10** rollout guide (one of the "two TCP guides" the toolchain installer follows). |
+| [`VE-Workstation Setup Guide-150626-181317.md`](docs/VE-Workstation%20Setup%20Guide-150626-181317.md) | **Prerequisites**: GitHub org + 2FA + repo access, the `D:` working partition, Git for Windows options, and the GitHub CLI. |
+| `01`–`04*.png` | Visual Studio 2026 installer / workload screenshots referenced by the guides. |
+
+The original PDFs (`*.pdf`) are kept alongside the Markdown as the authoritative source. (These
+guides previously lived outside the repo, so treat any credentials that appeared in the older
+copies as compromised and rotate them.)
 
 ## Build Flow
 
@@ -167,6 +186,7 @@ is tee'd to `.logs/build-vm-<timestamp>.log`. After each run, `.logs/latest.log`
 | `--detach` / `--no-follow` | Return as soon as the VM is started, instead of following the install. By default the build follows the in-guest install, waits for the `--stop-at` target to finish, and stops with an error if the installer reports one |
 | `--export DIR` | After the build, power off and export a portable OVA into host directory `DIR` |
 | `--export-only DIR` | Skip the build; export the already-built VM into `DIR` (host VM by default, or the container's VM with `--container`) |
+| `--sanitize` | Before export, strip the clear-text GitHub NuGet token and **gate** (refuse to export if a GitHub token or AWS key remains), writing a `<ova>.sanitized` marker. Use for OVAs you'll publish (see [Publishing the OVA to GHCR](#publishing-the-ova-to-ghcr)) |
 | `--container` | Build inside the `vmbuilder` Docker container instead of on this host (needs Docker). The container uses **NAT** (no bridged DHCP inside it). The default host build uses **bridged** networking (real DHCP, so the VM is device-reachable). See [Building in a container](#building-in-a-container) |
 | `--no-container` / `--host-build` | Force the default host build explicitly (a no-op unless you also passed `--container`) |
 | `--dry-run` | Stage a marker so the in-guest tool install runs dummy steps (each sleeps a few seconds) to verify the whole flow in minutes; no credentials needed |
@@ -265,6 +285,75 @@ default and only port 22 for SSH would be open). All four servers bind every int
 the build rewrites the other three to `0.0.0.0` so a device can reach any of them directly.
 Devices normally connect through `TerminalHubApi` (8010).
 
+### Connecting a clock (`tcp-tl-70` / linclock) to this VM
+
+The Clockware firmware (`tcp-tl-70`) — on a real RDTg/POS device or as a **linclock** desktop/VM
+build — does **not** hardcode a port. It reads one setting, **`serverUrl`**, and issues REST calls
+to `<serverUrl>/api/v0000/...`. Point that at this VM's `TerminalHubApi` and it's connected.
+
+**Step 1 — point the clock at the VM.** `serverUrl` must be the full scheme + host + port:
+
+```mermaid
+flowchart TD
+    classDef cfg  fill:#fff3e0,stroke:#e65100,color:#bf360c;
+    classDef val  fill:#ede7f6,stroke:#4527a0,color:#311b92;
+    classDef net  fill:#e1f5fe,stroke:#0277bd,color:#01579b;
+
+    S1["① Set <b>serverUrl</b> on the clock, via one of:<br/>• Network Settings UI (Server URL field)<br/>• TC_AUTOCONFIG7 provisioning file (key <b>APIURI</b>)<br/>• SQLite localSettings.ServerUrl (tcp_settings7.db)"]:::cfg
+    S2["② <b>serverUrl = https://&lt;VM-IP&gt;:8010</b><br/>(TerminalHubApi)"]:::val
+    S3["③ Make the VM reachable on the LAN:<br/>run it <b>bridged</b> — NAT is host-only<br/>(a --container build defaults to NAT)"]:::net
+    S4["④ Firewall already opens 8008/8010/8012/8014;<br/>all four servers bind 0.0.0.0"]:::net
+    S5["⑤ Dev TLS: set <b>shouldSkipSslValidation</b><br/>(or pin the self-signed CA);<br/>match http/https to what the VM serves"]:::net
+
+    S1 --> S2 --> S3 --> S4 --> S5
+```
+
+Provisioning example (`TC_AUTOCONFIG7` on the device, or type the URL into the Network Settings
+screen): `APIURI=https://<VM-IP>:8010` (and `APINS=<company-namespace>`).
+
+**Step 2 — what the clock then does.** On boot it auto-registers, then runs its normal loop —
+all plain REST/JSON over libcurl, every request carrying its identity:
+
+```mermaid
+flowchart TD
+    classDef dev  fill:#e3f2fd,stroke:#1565c0,color:#0d47a1;
+    classDef auth fill:#fce4ec,stroke:#ad1457,color:#880e4f;
+    classDef srv  fill:#e8f5e9,stroke:#2e7d32,color:#1b5e20;
+    classDef data fill:#f3e5f5,stroke:#6a1b9a,color:#4a148c;
+
+    D["🕐 Clock / linclock<br/>(tcp-tl-70, libcurl)"]:::dev
+    A["Auth on <b>every</b> request:<br/>header <b>Standalone-Id: &lt;device_id&gt;</b><br/>+ cookie session (setup-password LogOn)<br/>+ confirmationValue token · TLS"]:::auth
+    R["First contact — auto-register:<br/>IsStandaloneTerminalRegistered →<br/>RegisterStandAloneTerminal →<br/>GetStandaloneSpecs (config pull)"]:::dev
+    L["Then, ongoing:<br/>heartbeat (UpdateStandaloneTerminal),<br/>punches (clockOperation/…),<br/>sessions, biometric, offline-punch upload"]:::dev
+    H["<b>TerminalHubApi :8010</b><br/>REST base <b>/api/v0000/</b>"]:::srv
+    P["AppServerApi :8008"]:::srv
+    Q["SQL Server<br/>DB <b>Tcp70ProdTest</b>"]:::data
+
+    D --> A --> R --> L --> H --> P --> Q
+```
+
+So: set `serverUrl` → the clock hits **`:8010` `/api/v0000/...`** → `TerminalHubApi` fans out to
+`AppServerApi` (8008) and SQL Server. Nothing in the firmware treats 8010 specially — it's simply
+whatever host:port you put in `serverUrl`. (See the guides in [`docs/`](docs/) for the server side.)
+
+### Restoring a test database over the network
+
+`tcp-tl-70`'s `scripts/dbRestore/restoreDb.sh` restores a database into this VM's SQL Server from
+another machine. The build provisions everything that needs, in `post_build`:
+
+- **Mixed-mode SQL auth** — SQL Server installs Windows-auth-only (`LoginMode=1`), which makes the
+  `tcadmin` / `Q3WShUtj8K` SQL logins unusable over the network ("Login failed"). The build sets
+  `LoginMode=2` and restarts SQL so SQL-auth works.
+- **`tcadmin` is granted `sysadmin`** — needed for `RESTORE DATABASE`, `ALTER DATABASE … SET
+  SINGLE_USER`, and `CREATE PROCEDURE`.
+- **A writable `Backups` SMB share** (`D:\MSSQL\Backup`, full access for `dev`) — SQL Server can
+  only `RESTORE` from its own filesystem, so the runner copies the `.bak` there first (matches the
+  `REMOTE_SHARE_NAME` / `REMOTE_WINDOWS_BAK_DIR` defaults in that script).
+- **Firewall opened for SQL `1433` and SMB `445`** (both bind `0.0.0.0` but Windows Firewall drops
+  them off-box otherwise) — in addition to the WebEdition ports above.
+
+This is scoped for a disposable QA VM; tighten it if these VMs ever hold anything real.
+
 ### Finding a PIN-only employee to test login
 
 To sign in at the webclock or a device **without biometrics**, you need an employee that has a PIN
@@ -313,6 +402,48 @@ Export powers the VM off (the servers restart on the next boot) and writes the O
 folder. For the default host build that's a direct export; a `--container` build exports inside the
 container and stream-copies the OVA out. The OVA imports into any VirtualBox through
 File > Import Appliance.
+
+## Publishing the OVA to GHCR
+
+An OVA is **not** pushed anywhere by default (`--export` is local only). To host it on ghcr, use the
+publish flow — but note a `--stop-at all` image carries a **secret**: `configure_credentials.cmd`
+adds the GitHub NuGet source with `--store-password-in-clear-text`, so the GitHub token sits in
+clear text in dev's `NuGet.Config`. (The clone scrubs the token from each repo's git remote, so
+`.git/config` is clean.) Publishing must strip that first.
+
+- **`build-vm.sh --sanitize`** — before export, removes the GitHub NuGet source (deleting the
+  clear-text token), then **gates**: it re-scans `NuGet.Config` for a token and the machine
+  environment for an AWS key, and **refuses to export** if either remains. On success it writes a
+  `<ova>.sanitized` marker next to the OVA. Cloned repos + the test DB are kept.
+- **`publish-ova.sh`** — pushes the OVA to `ghcr.io/tcp-software/win11-ova:<tag>` via `oras`, and
+  **refuses to push** unless the `<ova>.sanitized` marker is present. So an un-sanitized OVA can't
+  leak the token by accident (this mirrors the secret gate in `clockware-toolchains`). Needs a GHCR
+  **PAT** (`GHCR_USER` + `GHCR_PAT`; `GH_TOKEN` accepted) — the gh OAuth token is rejected by GHCR.
+- **`Jenkinsfile`** — a pipeline (mirroring `clockware-toolchains`) that builds with `--sanitize`,
+  then publishes when `PUBLISH` is true, using the `tcp-ci` Secret-text credential for both the
+  clone and the push.
+
+```bash
+# build a publishable (sanitized, gated) OVA, then push it
+./build-vm.sh --unattended --container --stop-at all --clean \
+    --iso <iso> --cfg <cfg> --export /data/win11vbox-vm --sanitize
+GHCR_USER=oosman-tcps GHCR_PAT=<pat> ./publish-ova.sh          # gate + oras push
+```
+
+Heads-up: the OVA is ~80 GB, so a push over a slow/flaky uplink can take **hours** — publish from a
+host (or CI agent) with a fast, stable connection. `oras` uploads a blob as a **single,
+non-resumable** request, so any drop restarts the whole upload from zero.
+
+**Smoke-test the publish plumbing first.** Before a multi-hour build + 80 GB push, validate the ghcr
+path with a throwaway artifact: `smoke-publish.sh` pushes a tiny (or, with `SMOKE_SIZE=80G`, an
+80 GB sparse) dummy, pulls it back, and deletes it. `Jenkinsfile.smoke` runs it as a quick Jenkins
+job (with a `SMOKE_SIZE` parameter) so you can confirm credentials, `oras`, and — at `80G` — whether
+GHCR accepts a blob that large, before committing to the real build.
+
+```bash
+GHCR_USER=oosman-tcps GHCR_PAT=<pat> ./smoke-publish.sh                 # tiny, seconds
+GHCR_USER=oosman-tcps GHCR_PAT=<pat> SMOKE_SIZE=80G ./smoke-publish.sh  # full-size, needs a fast link
+```
 
 ## Launching the VM (bridged, hardened)
 
