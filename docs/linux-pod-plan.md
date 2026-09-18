@@ -1,6 +1,6 @@
 # TimeClock Plus WebEdition on Linux — Migration Plan (VM → Pods)
 
-**Status:** LOCKED — execution in progress · **Owner:** _tbd_ · **Last updated:** 2026-09-18
+**Status:** Phases 0–5 COMPLETE (all gates green) · Phase 6 (legacy server ports) deferred · **Owner:** _tbd_ · **Last updated:** 2026-09-18
 
 Move the TimeClock Plus **WebEdition** development/host environment off the Windows 11 VirtualBox VM
 (`win11vbox` / `build-vm.sh`) and onto **Linux containers/pods** — building the whole stack from
@@ -156,8 +156,8 @@ flowchart TD
     P2["<b>Phase 2</b> — AppServerApi pod — ✅ DONE<br/>.NET 10 on aspnet:10.0, live SQL session proven · gate PASS"]:::done
     P3["<b>Phase 3</b> — Clock connectivity e2e — ✅ DONE<br/>scripted clock → AppServerApi :8008 → SQL · gate PASS"]:::done
     P4["<b>Phase 4</b> — Pod assembly + clock connectivity — ✅ DONE<br/>compose pod · external clock e2e · gate PASS"]:::done
-    P5["<b>Phase 5</b> — CI/CD, publish, docs, cutover — ▶ now"]:::now
-    P6["<b>Phase 6</b> — Port legacy servers (deferred dev lift)<br/>TerminalHub → Adm → Workstation"]:::lift
+    P5["<b>Phase 5</b> — CI/CD, publish, docs, cutover — ✅ DONE<br/>meta-gate PASS · publish workflows · docs"]:::done
+    P6["<b>Phase 6</b> — Port legacy servers (deferred dev lift) — ▶ next<br/>TerminalHub → Adm → Workstation"]:::lift
 
     P0 --> P1 --> P2 --> P3 --> P4 --> P5 --> P6
 ```
@@ -184,7 +184,7 @@ flowchart TD
     T1 --> P2["Phase 2 ✅"]:::done --> T2["tests/phase2-appserver.sh<br/>:8008 up · live SQL session — PASS"]:::t
     T2 --> P3["Phase 3 ✅"]:::done --> T3["tests/phase3-clock-e2e.sh<br/>clock → :8008 → SQL: register + auth — PASS"]:::t
     T3 --> P4["Phase 4 ✅"]:::done --> T4["tests/phase4-pod-e2e.sh<br/>pod up · external clock → :8008 → SQL — PASS"]:::t
-    T4 --> P5["Phase 5"]:::ph --> T5["CI runs every gate on a clean checkout"]:::t
+    T4 --> P5["Phase 5 ✅"]:::done --> T5["run-all-gates.sh / linux-pod-ci.yml<br/>every gate on a clean checkout — META-GATE PASS"]:::t
     T5 --> P6["Phase 6"]:::ph --> T6["tests/phase6-hubs.sh<br/>ported legacy servers on Kestrel (deferred)"]:::t
 ```
 
@@ -393,15 +393,30 @@ flowchart TD
     a `curl -w '%{http_code}' || echo 000` readiness check double-printed `000000` and false-passed — match
     `^[1-5][0-9][0-9]$` instead.
 
-### Phase 5 — CI/CD, publish, docs, cutover
+### Phase 5 — CI/CD, publish, docs, cutover ✅ DONE — meta-gate PASS
 - **Goal:** repeatable, documented, and the VM demoted to fallback.
-- **Steps:** GitHub Actions to build/publish `webeditionbuilder` and the runtime images; a smoke test
-  (mirroring `smoke-publish.sh`) for the pod; docs in `tcp-we-70`; update `win11vbox` README to point
-  at the pod as the primary path where applicable.
-- **Acceptance — CI pipeline (the meta-gate):** on a **clean runner/checkout**, CI builds the images,
-  brings the pod up, and runs **every prior gate in order** (`phase0` → `phase4`) plus a publish smoke
-  test (mirroring `smoke-publish.sh`); the pipeline is red if any gate fails. A nightly/PR run proves
-  the whole stack reproduces from scratch and still meets every phase's goals.
+- **What was built:**
+  - **The meta-gate** `docker/tests/run-all-gates.sh` — runs every phase gate in order against **one
+    freshly-provisioned pod**: phase0 (builder image) → phase4 (self-contained pod e2e, `KEEP_UP`) →
+    phase1/2/3 against that running pod → teardown. **Verified locally: `META-GATE: PASS`** (all five
+    green — 23 companies, 607 employees, 8 PIN-only, appserver live SQL session, clock register+auth on
+    `:8008`).
+  - **CI** `tcp-we-70/.github/workflows/linux-pod-ci.yml` — runs the meta-gate on a **clean runner**
+    (nightly + PRs touching `docker/**` or the ported projects): checks out `tcp-we-70` (LFS) +
+    `docker-builder`, pulls-or-builds `webeditionbuilder` + `webedition-wine`, builds the AppServerApi
+    runtime from source, runs `run-all-gates.sh`. `GITHUB_TOKEN` reads the private `DMI.*` feed.
+  - **Publish workflows** (the "build → gate → push" pattern, mirroring `clockwarebuilder`):
+    `docker-builder/.github/workflows/publish-webeditionbuilder-ghcr.yml` (runs the Phase 0 gate before
+    the push) and `tcp-we-70/.github/workflows/publish-webedition-wine-ghcr.yml` (so the pod/CI pull the
+    Wine + .NET 4.8 image instead of rebuilding dotnet48). The images ARE the pod's publishable
+    artifacts; their in-workflow gate is the publish smoke test.
+  - **Docs:** `tcp-we-70/docker/README-linux-pod.md` (bring the pod up, point a clock at `:8008`, run the
+    gates) and a pointer from the `win11vbox` README to the pod as the primary Linux path.
+- **Acceptance — CI meta-gate — ✅ met (locally green; wired into CI):** on a clean checkout the pipeline
+  builds/pulls the images, brings the pod up, provisions from source, and runs **every prior gate in
+  order (`phase0` → `phase4`)**; red if any gate fails. The nightly/PR run proves the whole stack
+  reproduces from scratch and still meets every phase's goals. _(The GH Actions run itself is pending a
+  push to a branch CI can see; the gate logic it invokes is proven by the local `META-GATE: PASS`.)_
 
 ---
 

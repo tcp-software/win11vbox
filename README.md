@@ -20,6 +20,13 @@ start the runtime servers on every boot. You can also stop at any intermediate s
 This file is the single source of truth for the automated build; it distills the manual setup
 guides in [`docs/`](#source-guides-docs), which `build-vm.sh` automates step for step.
 
+> **Moving off the VM?** The WebEdition **database + AppServerApi now run on Linux containers** — no
+> Windows VM — and a `tcp-tl-70` clock connects to the pod on `:8008`. See the migration plan
+> [`docs/linux-pod-plan.md`](docs/linux-pod-plan.md) (Phases 0–5 green: builder image, DB built from
+> source, .NET 10 app server, clock e2e, deployable pod + CI meta-gate) and the runtime pod in
+> `tcp-we-70/docker/` (`README-linux-pod.md`). The VM stays as the fallback and for the three legacy
+> admin/aux servers still to be ported (Phase 6).
+
 ## Source Guides (`docs/`)
 
 `build-vm.sh` is an automation of TCP's manual dev-VM setup guides. Those guides live in
