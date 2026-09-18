@@ -186,6 +186,7 @@ is tee'd to `.logs/build-vm-<timestamp>.log`. After each run, `.logs/latest.log`
 | `--detach` / `--no-follow` | Return as soon as the VM is started, instead of following the install. By default the build follows the in-guest install, waits for the `--stop-at` target to finish, and stops with an error if the installer reports one |
 | `--export DIR` | After the build, power off and export a portable OVA into host directory `DIR` |
 | `--export-only DIR` | Skip the build; export the already-built VM into `DIR` (host VM by default, or the container's VM with `--container`) |
+| `--sanitize` | Before export, strip the clear-text GitHub NuGet token and **gate** (refuse to export if a GitHub token or AWS key remains), writing a `<ova>.sanitized` marker. Use for OVAs you'll publish (see [Publishing the OVA to GHCR](#publishing-the-ova-to-ghcr)) |
 | `--container` | Build inside the `vmbuilder` Docker container instead of on this host (needs Docker). The container uses **NAT** (no bridged DHCP inside it). The default host build uses **bridged** networking (real DHCP, so the VM is device-reachable). See [Building in a container](#building-in-a-container) |
 | `--no-container` / `--host-build` | Force the default host build explicitly (a no-op unless you also passed `--container`) |
 | `--dry-run` | Stage a marker so the in-guest tool install runs dummy steps (each sleeps a few seconds) to verify the whole flow in minutes; no credentials needed |
@@ -284,6 +285,75 @@ default and only port 22 for SSH would be open). All four servers bind every int
 the build rewrites the other three to `0.0.0.0` so a device can reach any of them directly.
 Devices normally connect through `TerminalHubApi` (8010).
 
+### Connecting a clock (`tcp-tl-70` / linclock) to this VM
+
+The Clockware firmware (`tcp-tl-70`) — on a real RDTg/POS device or as a **linclock** desktop/VM
+build — does **not** hardcode a port. It reads one setting, **`serverUrl`**, and issues REST calls
+to `<serverUrl>/api/v0000/...`. Point that at this VM's `TerminalHubApi` and it's connected.
+
+**Step 1 — point the clock at the VM.** `serverUrl` must be the full scheme + host + port:
+
+```mermaid
+flowchart TD
+    classDef cfg  fill:#fff3e0,stroke:#e65100,color:#bf360c;
+    classDef val  fill:#ede7f6,stroke:#4527a0,color:#311b92;
+    classDef net  fill:#e1f5fe,stroke:#0277bd,color:#01579b;
+
+    S1["① Set <b>serverUrl</b> on the clock, via one of:<br/>• Network Settings UI (Server URL field)<br/>• TC_AUTOCONFIG7 provisioning file (key <b>APIURI</b>)<br/>• SQLite localSettings.ServerUrl (tcp_settings7.db)"]:::cfg
+    S2["② <b>serverUrl = https://&lt;VM-IP&gt;:8010</b><br/>(TerminalHubApi)"]:::val
+    S3["③ Make the VM reachable on the LAN:<br/>run it <b>bridged</b> — NAT is host-only<br/>(a --container build defaults to NAT)"]:::net
+    S4["④ Firewall already opens 8008/8010/8012/8014;<br/>all four servers bind 0.0.0.0"]:::net
+    S5["⑤ Dev TLS: set <b>shouldSkipSslValidation</b><br/>(or pin the self-signed CA);<br/>match http/https to what the VM serves"]:::net
+
+    S1 --> S2 --> S3 --> S4 --> S5
+```
+
+Provisioning example (`TC_AUTOCONFIG7` on the device, or type the URL into the Network Settings
+screen): `APIURI=https://<VM-IP>:8010` (and `APINS=<company-namespace>`).
+
+**Step 2 — what the clock then does.** On boot it auto-registers, then runs its normal loop —
+all plain REST/JSON over libcurl, every request carrying its identity:
+
+```mermaid
+flowchart TD
+    classDef dev  fill:#e3f2fd,stroke:#1565c0,color:#0d47a1;
+    classDef auth fill:#fce4ec,stroke:#ad1457,color:#880e4f;
+    classDef srv  fill:#e8f5e9,stroke:#2e7d32,color:#1b5e20;
+    classDef data fill:#f3e5f5,stroke:#6a1b9a,color:#4a148c;
+
+    D["🕐 Clock / linclock<br/>(tcp-tl-70, libcurl)"]:::dev
+    A["Auth on <b>every</b> request:<br/>header <b>Standalone-Id: &lt;device_id&gt;</b><br/>+ cookie session (setup-password LogOn)<br/>+ confirmationValue token · TLS"]:::auth
+    R["First contact — auto-register:<br/>IsStandaloneTerminalRegistered →<br/>RegisterStandAloneTerminal →<br/>GetStandaloneSpecs (config pull)"]:::dev
+    L["Then, ongoing:<br/>heartbeat (UpdateStandaloneTerminal),<br/>punches (clockOperation/…),<br/>sessions, biometric, offline-punch upload"]:::dev
+    H["<b>TerminalHubApi :8010</b><br/>REST base <b>/api/v0000/</b>"]:::srv
+    P["AppServerApi :8008"]:::srv
+    Q["SQL Server<br/>DB <b>Tcp70ProdTest</b>"]:::data
+
+    D --> A --> R --> L --> H --> P --> Q
+```
+
+So: set `serverUrl` → the clock hits **`:8010` `/api/v0000/...`** → `TerminalHubApi` fans out to
+`AppServerApi` (8008) and SQL Server. Nothing in the firmware treats 8010 specially — it's simply
+whatever host:port you put in `serverUrl`. (See the guides in [`docs/`](docs/) for the server side.)
+
+### Restoring a test database over the network
+
+`tcp-tl-70`'s `scripts/dbRestore/restoreDb.sh` restores a database into this VM's SQL Server from
+another machine. The build provisions everything that needs, in `post_build`:
+
+- **Mixed-mode SQL auth** — SQL Server installs Windows-auth-only (`LoginMode=1`), which makes the
+  `tcadmin` / `Q3WShUtj8K` SQL logins unusable over the network ("Login failed"). The build sets
+  `LoginMode=2` and restarts SQL so SQL-auth works.
+- **`tcadmin` is granted `sysadmin`** — needed for `RESTORE DATABASE`, `ALTER DATABASE … SET
+  SINGLE_USER`, and `CREATE PROCEDURE`.
+- **A writable `Backups` SMB share** (`D:\MSSQL\Backup`, full access for `dev`) — SQL Server can
+  only `RESTORE` from its own filesystem, so the runner copies the `.bak` there first (matches the
+  `REMOTE_SHARE_NAME` / `REMOTE_WINDOWS_BAK_DIR` defaults in that script).
+- **Firewall opened for SQL `1433` and SMB `445`** (both bind `0.0.0.0` but Windows Firewall drops
+  them off-box otherwise) — in addition to the WebEdition ports above.
+
+This is scoped for a disposable QA VM; tighten it if these VMs ever hold anything real.
+
 ### Finding a PIN-only employee to test login
 
 To sign in at the webclock or a device **without biometrics**, you need an employee that has a PIN
@@ -361,7 +431,19 @@ GHCR_USER=oosman-tcps GHCR_PAT=<pat> ./publish-ova.sh          # gate + oras pus
 ```
 
 Heads-up: the OVA is ~80 GB, so a push over a slow/flaky uplink can take **hours** — publish from a
-host (or CI agent) with a fast, stable connection.
+host (or CI agent) with a fast, stable connection. `oras` uploads a blob as a **single,
+non-resumable** request, so any drop restarts the whole upload from zero.
+
+**Smoke-test the publish plumbing first.** Before a multi-hour build + 80 GB push, validate the ghcr
+path with a throwaway artifact: `smoke-publish.sh` pushes a tiny (or, with `SMOKE_SIZE=80G`, an
+80 GB sparse) dummy, pulls it back, and deletes it. `Jenkinsfile.smoke` runs it as a quick Jenkins
+job (with a `SMOKE_SIZE` parameter) so you can confirm credentials, `oras`, and — at `80G` — whether
+GHCR accepts a blob that large, before committing to the real build.
+
+```bash
+GHCR_USER=oosman-tcps GHCR_PAT=<pat> ./smoke-publish.sh                 # tiny, seconds
+GHCR_USER=oosman-tcps GHCR_PAT=<pat> SMOKE_SIZE=80G ./smoke-publish.sh  # full-size, needs a fast link
+```
 
 ## Launching the VM (bridged, hardened)
 
