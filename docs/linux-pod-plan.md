@@ -1,6 +1,6 @@
 # TimeClock Plus WebEdition on Linux — Migration Plan (VM → Pods)
 
-**Status:** DRAFT for review · **Owner:** _tbd_ · **Last updated:** 2026-09-18
+**Status:** LOCKED — execution in progress · **Owner:** _tbd_ · **Last updated:** 2026-09-18
 
 Move the TimeClock Plus **WebEdition** development/host environment off the Windows 11 VirtualBox VM
 (`win11vbox` / `build-vm.sh`) and onto **Linux containers/pods** — building the whole stack from
