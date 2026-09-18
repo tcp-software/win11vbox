@@ -28,7 +28,11 @@ source in a fresh Linux builder image, and hosting the databases and servers as 
     compiler's bootstrap binary): it is imported once, then the v7 schema, migration engine, and
     generator — **all built/run from source** — produce the final `Tcp70ProdTest`.
 - **G2** — The WebEdition **servers** run in the same pod, reachable on their ports
-  (8008/8010/8012/8014), with a clock/linclock able to connect to `TerminalHubApi` (8010).
+  (8008/8010/8012/8014), with a clock/linclock able to connect to **`AppServerApi` (8008)** — *correction
+  (Phase 3 sizing):* every endpoint `tcp-tl-70` calls (`clockOperation`, `Biometric`,
+  `terminalSpecifications/…/RegisterStandAloneTerminal|IsStandaloneTerminalRegistered|GetStandaloneSpecs`,
+  `employeeSessions`, `viewSchedules`, …) is an AppServerApi controller; `TerminalHubApi` is a thin
+  admin *proxy* to it, not the clock's endpoint.
 - **G3** — Everything **builds from source in a fresh Linux container** — no Windows, no VM — with
   all packages installed as needed.
 - **G4** — Reproducible + publishable: a standardized **`webeditionbuilder`** image (in
@@ -75,7 +79,7 @@ flowchart TD
     end
 
     NOW ==>|migrate| TGT
-    CLK["🕐 tcp-tl-70 / linclock<br/>serverUrl → :8010"]:::ext
+    CLK["🕐 tcp-tl-70 / linclock<br/>serverUrl → :8008 (AppServerApi)"]:::ext
     CLK --> HUB
 ```
 
@@ -88,7 +92,7 @@ flowchart TD
 | **Databases** (`Tcp70ProdTest`, `Tcp70Report`, `Tcp60*`, base `TimeClockPlus70Core`) | 1433 | SQL Server 2022 | ✅ **Native + buildable from source.** SSDT project is SDK-style **`Microsoft.Build.Sql`** (builds on Linux via `dotnet build` — `docker/sql.Dockerfile` already does it); the `ProdTestResourceGenerator` data generator is **`net10.0`** (runs on Linux). Build schema → create DB → deploy → generate (the `stage-dbs` path). No `xp_cmdshell`/FILESTREAM/CLR. (Pre-built LFS `.bak`/`.bacpac` exist but we don't use them.) |
 | **AppServerApi** | 8008 | **.NET 10 / Kestrel** | ✅ **Runs as-is** — already has Linux Dockerfiles (`docker/app.Dockerfile`, `AppServerApi/Dockerfile`) |
 | **AdmServerApi** | 8012 | .NET Fx 4.7.2 + WCF self-host + Asterisk.NET | ⚠️ **Port required** |
-| **TerminalHubApi** | 8010 | .NET Fx 4.7.2 + WCF + native SQLite + device drivers | ⚠️ **Port required** (the clock's endpoint — highest priority) |
+| **TerminalHubApi** | 8010 | .NET Fx 4.7.2 + WCF (Web API 2 self-host) | ⚠️ **Port required** — but it is the terminal *admin proxy* (its 23 controllers `ExecuteRequest` to AppServerApi), **not the clock's endpoint** (the clock talks to AppServerApi :8008). Lower priority than first assumed. |
 | **WorkstationHubApi** | 8014 | .NET Fx 4.7.2 + WCF + native `SQLite.Interop.dll` | ⚠️ **Port required** |
 | **Client** (`tcp-core-client`, npm/grunt) | — | Node | ✅ Cross-platform |
 
@@ -287,8 +291,36 @@ flowchart TD
   container's hostname, `program_name` = `TimeClock Plus`, database `Tcp70ProdTest`. Fails fast (with
   the container's last log lines) if it exits or the DB is unreachable. Non-zero on any miss.
 
-### Phase 3 — Port the legacy servers ⚠️ (the development lift)
+### Phase 3 — Port the legacy servers ⚠️ (the development lift) — ▶ in progress (TerminalHubApi first)
 - **Goal:** `TerminalHubApi`, `AdmServerApi`, `WorkstationHubApi` build + run on Linux.
+- **Sizing findings (TerminalHubApi):**
+  - It is a **legacy-style** csproj (`ToolsVersion 4.0`, `v4.7.2`) on **Web API 2** (`Microsoft.AspNet.WebApi.Core`,
+    `System.Web`, `System.ServiceModel.*`, `System.Data.Linq`), hosted by `Common/WebApi`'s `HttpRouteServer`
+    = WCF **`HttpSelfHostServer`** (Windows-only).
+  - **The Kestrel host is a drop-in:** AppServerApi's `pro/HttpRouteServer.cs` (same `Tcp.WebApi` namespace,
+    same `(hostAddress, port)` ctor and `PreSleepCommand` API) + its `Startup` (`AddMvcCore` →
+    `AddXmlSerializerFormatters().AddNewtonsoftJson`, `UseRouting`/`MapControllers`).
+  - **Controllers are ~mechanical:** the 23 controllers inherit `AbstractTerminalHubApiController :
+    AbstractApiController(: ApiController)`; AppServerApi's Core `AbstractApiController : ControllerBase`
+    already implements **39 of those 42** helpers — only `GetUploadedResponseMessage`,
+    `GetUploadedSourceFileName` (multipart upload, used by `UploadFirmwareController`) and the Web-API-2
+    `Initialize(HttpControllerContext)` override need Core equivalents.
+  - **Every project ref is already `netstandard2.0` except `Common/TerminalHub` (`net472`, SDK-style,
+    193 files, one `C:\GetMinTemplate.dat` path)** — the one real retarget.
+  - **The DMI risk, measured:** `TerminalHub` uses the closed `DMI.TimeClockPlus.Common` (net472-only) in
+    109 files, but as the terminal *domain model* (`TerminalPromptDefaultLineItem`, `TerminalCommand`,
+    `TerminalKey`, `TerminalBadgeInfo`, `ITerminal*`, enums). A `System.Reflection.Metadata` scan shows
+    **all 10 P/Invokes in that DLL live in one class, `SafeNativeMethods`** (kernel32 mailslot/`CreateFile`,
+    advapi32 security descriptors, user32 window focus) — which TerminalHub **never references**. So on
+    .NET 10/Linux the net472 IL loads via the NU1701 compat shim and only a path reaching
+    `SafeNativeMethods` could fail at runtime. Watch-list: `ITerminalFileTransferClient` (17 refs) and
+    `TerminalAuxDevice` (20 refs). **Fallback if a path bites: run the hub under the proven Wine +
+    .NET 4.8 image** (Phase 1 recipe).
+  - **Approach chosen:** native .NET 10 port — retarget `TerminalHub` → `net10.0`; convert `TerminalHubApi`
+    to SDK-style `net10.0`; swap the WCF host for the Kestrel `HttpRouteServer`/`Startup`; rebase the
+    controllers on the Core `AbstractApiController` (+3 helpers); drop the `System.Web*`/`ServiceModel`/
+    `Data.Linq` references. Shared Windows-build sources stay untouched where possible (`.linux.csproj`
+    variants, as in Phase 1).
 - **Steps (per server; TerminalHubApi first — it's the clock's endpoint):**
   1. Retarget csproj `v4.7.2` → `net8/10`; convert to SDK-style + PackageReference.
   2. Replace **WCF `HttpSelfHostServer`** (`Common/WebApi`) with **Kestrel/ASP.NET Core** — build on
@@ -299,14 +331,17 @@ flowchart TD
      **WorkstationHubApi** — native `SQLite.Interop.dll` → `Microsoft.Data.Sqlite`; **AdmServerApi** —
      `Asterisk.NET`/telephony.
   4. Add each to the compose/pod once green.
-- **Acceptance — `tests/phase3-hubs.sh` + `tests/phase3-clock-e2e.sh` (CI gate):** `phase3-hubs.sh`
-  asserts each ported server **builds with `dotnet` on Linux**, starts under Kestrel, and answers a
-  health/version call on its port (8010/8012/8014). `phase3-clock-e2e.sh` is the real TerminalHubApi
-  gate: drive a **headless linclock (or a scripted client) with `serverUrl=…:8010`** through
-  auto-registration (`IsStandaloneTerminalRegistered`→`RegisterStandAloneTerminal`→`GetStandaloneSpecs`)
-  and a **clock punch**, with the `Standalone-Id` header, then assert the registration + punch
-  **landed in the DB** (a `go-sqlcmd` row check). Non-zero if any server fails to build/start or the
-  clock e2e doesn't reach the DB.
+- **Acceptance — `tests/phase3-clock-e2e.sh` + `tests/phase3-hubs.sh` (CI gate):**
+  `phase3-clock-e2e.sh` is the **clock-connectivity proof the whole initiative is about**, and — since
+  the clock's endpoint is **AppServerApi (:8008)**, already running from Phase 2 — it is runnable *now*:
+  drive a scripted client (the exact `tcp-tl-70` request URLs from `common/Requests/RequestUrls.h`) with
+  `serverUrl=…:8008` through auto-registration (`IsStandaloneTerminalRegistered` →
+  `RegisterStandAloneTerminal?standAloneTerminalName=…` → `GetStandaloneSpecs`) and a **clock punch**
+  (`clockOperation` `StartQuickPunch`/`StartClockIn` under an employee session), with the `Standalone-Id`
+  header, then assert the registration + punch **landed in the DB** (a `go-sqlcmd` row check).
+  `phase3-hubs.sh` asserts each *ported* legacy server (TerminalHubApi admin proxy 8010, AdmServerApi
+  8012, WorkstationHubApi 8014) **builds with `dotnet` on Linux**, starts under Kestrel, and answers on
+  its port. Non-zero if the clock e2e doesn't reach the DB or any ported server fails to build/start.
 
 ### Phase 4 — Pod assembly + clock connectivity
 - **Goal:** a single deployable pod, reachable by devices.
