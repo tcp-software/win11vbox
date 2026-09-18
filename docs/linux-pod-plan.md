@@ -150,6 +150,27 @@ flowchart TD
 
 Green = achievable with existing pieces; red = genuine development (the .NET Framework → .NET port).
 
+### Automated verification (per-phase test gates)
+
+**Every phase ends with an automated test that asserts its goals and gates the next phase.** Each is a
+script that **exits non-zero on any failure**, runnable locally and in CI, run inside the
+`webeditionbuilder` image against the running pod. They live in `tests/` (runtime tests in
+`tcp-we-70/docker/tests/`; the image test in `docker-builder`). No phase is "done" until its gate is
+green; Phase 5 wires all gates into CI so a clean checkout must pass every one.
+
+```mermaid
+flowchart TD
+    classDef ph fill:#e8f5e9,stroke:#2e7d32,color:#1b5e20;
+    classDef t  fill:#e3f2fd,stroke:#1565c0,color:#0d47a1;
+
+    P0["Phase 0"]:::ph --> T0["tests/phase0-builder-smoke.sh<br/>tools + versions present"]:::t
+    T0 --> P1["Phase 1"]:::ph --> T1["tests/phase1-db.sh<br/>DBs built from source · logins · seeded rows"]:::t
+    T1 --> P2["Phase 2"]:::ph --> T2["tests/phase2-appserver.sh<br/>:8008 up · API→DB round-trip"]:::t
+    T2 --> P3["Phase 3"]:::ph --> T3["tests/phase3-hubs.sh + phase3-clock-e2e.sh<br/>hubs on Kestrel · clock registers + punches"]:::t
+    T3 --> P4["Phase 4"]:::ph --> T4["tests/phase4-pod-e2e.sh<br/>whole pod up · device→:8010→DB e2e"]:::t
+    T4 --> P5["Phase 5"]:::ph --> T5["CI runs every gate on a clean checkout"]:::t
+```
+
 ### Phase 0 — Groundwork
 - **Goal:** a standardized Linux build environment and the skeleton to hang everything on.
 - **Steps:**
@@ -160,8 +181,10 @@ Green = achievable with existing pieces; red = genuine development (the .NET Fra
   3. Ensure `git lfs` is present for any LFS **build inputs** the build genuinely needs (e.g.
      third-party libs). We do **not** depend on the pre-built `.bak`/`.bacpac` LFS artifacts — Phase 1
      builds the DB from source.
-- **Acceptance:** `webeditionbuilder` builds, is on ghcr, and inside it `dotnet --version`, `node -v`,
-  `git lfs version`, `sqlcmd`/`go-sqlcmd`, and `sqlpackage` all work.
+- **Acceptance — `tests/phase0-builder-smoke.sh` (CI gate):** run the published `webeditionbuilder`
+  and assert every tool is present at the required version — `dotnet --version` = 10.x, `node -v`,
+  `npm -v`, `git lfs version`, `go-sqlcmd`/`sqlcmd -?`, `sqlpackage /version`, `pwsh -v`. Exits
+  non-zero if any is missing or wrong (a fast pre-flight, same shape as `win11vbox`'s smoke test).
 
 ### Phase 1 — Database pod (built from source) ✅
 - **Goal:** the databases **built from source** (schema → create → deploy → generated data) and running
@@ -202,17 +225,22 @@ flowchart TD
     F -.-> OPT
 ```
 
-- **Acceptance:** the DB exists **with no `.bak` restored** — from another container `go-sqlcmd -S
-  mssql,1433 -U tcadmin -P … -Q "SELECT name FROM sys.databases"` lists `Tcp70ProdTest`, and a known
-  query (e.g. the PIN-only employee check) returns generated rows.
+- **Acceptance — `tests/phase1-db.sh` (CI gate):** with the DB **built from source (no `.bak`
+  restored)**, assert via `go-sqlcmd -S mssql,1433 -U tcadmin -P …`: (a) `Tcp70ProdTest` (+ the other
+  target DBs) appear in `sys.databases`; (b) the `tcadmin`/`Q3WShUtj8K` **SQL-auth logins connect**;
+  (c) **core tables exist and are non-empty** (schema + generated data present) — e.g. a seeded
+  employee-table `COUNT(*)` > 0; (d) a known query returns the expected shape (e.g. the PIN-only
+  employee check returns generated rows). Non-zero on any miss.
 
 ### Phase 2 — AppServerApi pod ✅
 - **Goal:** the .NET 10 app server running on Linux, talking to the DB pod.
 - **Steps:** use `docker/app.Dockerfile` (Node client build + `dotnet publish`); **bump base images
   8.0 → 10.0** to match `net10.0`; mount `cfg` with `TCPCONN.XML` → `ServerName=mssql`, `Port=1433`,
   `Integrated=false` (already SQL-auth); expose 8008.
-- **Acceptance:** `AppServerApi` container is healthy; a request to `:8008/api/v0000/...` succeeds and
-  round-trips to the DB.
+- **Acceptance — `tests/phase2-appserver.sh` (CI gate):** wait for the `AppServerApi` container
+  healthy, then assert: (a) a health/version endpoint on `:8008` returns 200; (b) an API call that
+  reads **through to SQL** returns expected data (proves app→DB wiring against the Phase-1 DB); (c) it
+  fails fast if the container exits or the DB is unreachable. Non-zero on any failure.
 
 ### Phase 3 — Port the legacy servers ⚠️ (the development lift)
 - **Goal:** `TerminalHubApi`, `AdmServerApi`, `WorkstationHubApi` build + run on Linux.
@@ -226,23 +254,35 @@ flowchart TD
      **WorkstationHubApi** — native `SQLite.Interop.dll` → `Microsoft.Data.Sqlite`; **AdmServerApi** —
      `Asterisk.NET`/telephony.
   4. Add each to the compose/pod once green.
-- **Acceptance:** each server starts under Kestrel on Linux; **a linclock/clock with `serverUrl =
-  https://<pod>:8010` auto-registers and can clock in** (the end-to-end proof for TerminalHubApi).
+- **Acceptance — `tests/phase3-hubs.sh` + `tests/phase3-clock-e2e.sh` (CI gate):** `phase3-hubs.sh`
+  asserts each ported server **builds with `dotnet` on Linux**, starts under Kestrel, and answers a
+  health/version call on its port (8010/8012/8014). `phase3-clock-e2e.sh` is the real TerminalHubApi
+  gate: drive a **headless linclock (or a scripted client) with `serverUrl=…:8010`** through
+  auto-registration (`IsStandaloneTerminalRegistered`→`RegisterStandAloneTerminal`→`GetStandaloneSpecs`)
+  and a **clock punch**, with the `Standalone-Id` header, then assert the registration + punch
+  **landed in the DB** (a `go-sqlcmd` row check). Non-zero if any server fails to build/start or the
+  clock e2e doesn't reach the DB.
 
 ### Phase 4 — Pod assembly + clock connectivity
 - **Goal:** a single deployable pod, reachable by devices.
 - **Steps:** finalize `docker-compose.yml` (dev) → **k8s manifests** (mssql + app + hubs, services,
   volumes); expose the ports; document pointing `tcp-tl-70`/linclock `serverUrl` at the pod (bridged
   reachability, TLS: `shouldSkipSslValidation` or a pinned self-signed CA for dev).
-- **Acceptance:** `kubectl apply` (or `docker compose up`) brings the whole stack up; a device connects
-  through `:8010` end to end.
+- **Acceptance — `tests/phase4-pod-e2e.sh` (CI gate):** bring the whole stack up (`docker compose up
+  -d` or `kubectl apply`, then wait-for-ready on every service), assert all intended ports are
+  reachable (8008/8010/8012/8014, and 1433 as scoped), run the **full clock e2e from outside the
+  pod** (register + punch + read-back through `:8010`→app→SQL), then tear down. Self-contained
+  (up → wait → assert → down); non-zero on any failure.
 
 ### Phase 5 — CI/CD, publish, docs, cutover
 - **Goal:** repeatable, documented, and the VM demoted to fallback.
 - **Steps:** GitHub Actions to build/publish `webeditionbuilder` and the runtime images; a smoke test
   (mirroring `smoke-publish.sh`) for the pod; docs in `tcp-we-70`; update `win11vbox` README to point
   at the pod as the primary path where applicable.
-- **Acceptance:** a clean checkout → one command → running pod, in CI.
+- **Acceptance — CI pipeline (the meta-gate):** on a **clean runner/checkout**, CI builds the images,
+  brings the pod up, and runs **every prior gate in order** (`phase0` → `phase4`) plus a publish smoke
+  test (mirroring `smoke-publish.sh`); the pipeline is red if any gate fails. A nightly/PR run proves
+  the whole stack reproduces from scratch and still meets every phase's goals.
 
 ---
 
@@ -265,6 +305,9 @@ flowchart TD
 ---
 
 ## 7. Definition of done
+
+Each milestone is **done only when its phases' automated gates pass** (the `tests/phaseN-*.sh` scripts
+in §5), green in CI — not by manual inspection.
 
 - **Milestone A (quick win):** Phases 0–2 — a Linux pod hosting the **databases + AppServerApi**,
   built by `webeditionbuilder`, reproducible from a clean checkout. _No physical clock yet._
