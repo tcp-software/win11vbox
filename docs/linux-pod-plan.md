@@ -80,7 +80,7 @@ flowchart TD
 
     NOW ==>|migrate| TGT
     CLK["🕐 tcp-tl-70 / linclock<br/>serverUrl → :8008 (AppServerApi)"]:::ext
-    CLK --> HUB
+    CLK --> APP
 ```
 
 ---
