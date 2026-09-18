@@ -17,7 +17,26 @@ repositories, build the server and client, restore a test database, apply the se
 start the runtime servers on every boot. You can also stop at any intermediate stage (see
 [Build stages](#build-stages)). It can export the finished VM as a portable OVA appliance.
 
-This file is the single source of truth; it replaces the older setup guides.
+This file is the single source of truth for the automated build; it distills the manual setup
+guides in [`docs/`](#source-guides-docs), which `build-vm.sh` automates step for step.
+
+## Source Guides (`docs/`)
+
+`build-vm.sh` is an automation of TCP's manual dev-VM setup guides. Those guides live in
+[`docs/`](docs/) (as Markdown with their screenshots, plus the original PDFs); when the code says
+"per the guide", this is what it means. Read them for the *why* behind a step, or to do it by hand.
+
+| Doc (`docs/`) | What it covers |
+|---|---|
+| [`VE-TimeClock Plus Server on a Windows 11 VM-110626-171548.md`](docs/VE-TimeClock%20Plus%20Server%20on%20a%20Windows%2011%20VM-110626-171548.md) | **The primary guide** — the full manual Win11-VM build: partitions, unattended Windows, toolchain, clone, server build, DB restore, starting the servers. |
+| [`VE-TimeClock Plus Server on a Windows 11 VM (Updated).md`](docs/VE-TimeClock%20Plus%20Server%20on%20a%20Windows%2011%20VM%20%28Updated%29.md) | **2026 addendum** (this wins where it differs): Visual Studio 2026 (replaces 2022), the .NET 10 SDK, `MSBUILD_PATH` → the VS 18 path, the four servers on ports 8008/8010/8012/8014, per-server `cfg` dirs, the .NET 10 namespace-stripping, and the elevated DB restore. |
+| [`VE-Rollout plan for .NET 10 - for Dev-110626-171557.md`](docs/VE-Rollout%20plan%20for%20.NET%2010%20-%20for%20Dev-110626-171557.md) | The **.NET 10** rollout guide (one of the "two TCP guides" the toolchain installer follows). |
+| [`VE-Workstation Setup Guide-150626-181317.md`](docs/VE-Workstation%20Setup%20Guide-150626-181317.md) | **Prerequisites**: GitHub org + 2FA + repo access, the `D:` working partition, Git for Windows options, and the GitHub CLI. |
+| `01`–`04*.png` | Visual Studio 2026 installer / workload screenshots referenced by the guides. |
+
+The original PDFs (`*.pdf`) are kept alongside the Markdown as the authoritative source. (These
+guides previously lived outside the repo, so treat any credentials that appeared in the older
+copies as compromised and rotate them.)
 
 ## Build Flow
 
