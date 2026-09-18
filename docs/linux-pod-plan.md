@@ -17,9 +17,16 @@ source in a fresh Linux builder image, and hosting the databases and servers as 
 
 **Goals**
 - **G1** — The WebEdition **databases** (`Tcp70ProdTest` and the others) are **built from source** —
-  SSDT schema project → create DB → deploy scripts → generated test data — and run in a Linux SQL
-  Server container/pod. We deliberately do **not** restore the pre-built `.bak`/`.bacpac` snapshots
-  the repo ships (they are cached build outputs; keeping them only as an optional dev-only fast path).
+  SSDT schema project → create v7 DB → run the migration engine (`UpgradeDatabase`, ported to
+  `net10.0`) → generate test data — and run in a Linux SQL Server container/pod. We deliberately do
+  **not** restore the pre-built **v7** `Tcp70ProdTest.bak`/`.bacpac` snapshots (those are cached build
+  outputs, kept only as an optional dev-only fast path).
+  - **One accepted bootstrap seed:** the base test *data* (companies, employees) has **no
+    from-source origin in the repo** — the product's own build upgrades a **v6** database
+    (`Tcp60ProdTest`) into v7, and that v6 DB only ever comes from the shipped `Tcp60ProdTest.bacpac`
+    (17 MB, Git-LFS). We therefore treat that **single v6 seed** as the irreducible bootstrap (like a
+    compiler's bootstrap binary): it is imported once, then the v7 schema, migration engine, and
+    generator — **all built/run from source** — produce the final `Tcp70ProdTest`.
 - **G2** — The WebEdition **servers** run in the same pod, reachable on their ports
   (8008/8010/8012/8014), with a clock/linclock able to connect to `TerminalHubApi` (8010).
 - **G3** — Everything **builds from source in a fresh Linux container** — no Windows, no VM — with
@@ -186,25 +193,37 @@ flowchart TD
   `npm -v`, `git lfs version`, `go-sqlcmd`/`sqlcmd -?`, `sqlpackage /version`, `pwsh -v`. Exits
   non-zero if any is missing or wrong (a fast pre-flight, same shape as `win11vbox`'s smoke test).
 
-### Phase 1 — Database pod (built from source) ✅
+### Phase 1 — Database pod (built from source) ✅ DONE — `tests/phase1-db.sh` PASS
 - **Goal:** the databases **built from source** (schema → create → deploy → generated data) and running
   in Linux SQL Server. **No pre-built `.bak`/`.bacpac` restored.** This is the NAnt `stage-dbs` path,
   ported to Linux.
-- **Steps:**
-  1. Add an `mcr.microsoft.com/mssql/server:2022-latest` service to `tcp-we-70/docker/docker-compose.yml`
-     (accept EULA, set `MSSQL_SA_PASSWORD`, a data volume).
-  2. **Build the schema from source** — `dotnet build` the SDK-style `Microsoft.Build.Sql` project
-     `TimeClockPlus70Core_StandAlone.sqlproj` → `TimeClockPlus70Core.sql` (`docker/sql.Dockerfile`
-     already does this on Linux).
-  3. **Create the databases** from that generated schema SQL (`Tcp70ProdTest`, `Tcp70Report`, the
-     `Core*` set) — port `__create-db-*` / `create-db-prod.bat` to a shell script driving `go-sqlcmd`.
-  4. **Apply deploy/migration scripts** — `Execute_Current_Deploy_Scripts.ps1` under `pwsh` on Linux.
-  5. **Generate test data** — run `dotnet Tcp.ProdTestResourceGenerator.dll` (it's `net10.0`) against
-     the new DB.
-  6. Create the SQL logins (`tcadmin`, `Q3WShUtj8K`); wrapper swaps throughout — `sqlcmd -E` (Windows
-     auth) → `go-sqlcmd -U tcadmin -P …`; `.bat`/PowerShell → shell/`pwsh`.
-  7. _(Optional)_ `BACKUP DATABASE … .TCB70` to (re)produce the shipped artifact **ourselves** —
-     proving the from-source build is authoritative (and refreshing the cached snapshot if we keep one).
+- **Steps (as executed — this is the real NAnt `__stage-db-prod` path, ported):**
+  1. Run `mcr.microsoft.com/mssql/server:2022-latest` (CU27) on the docker network `we-net`; SQL auth.
+  2. **Build the v7 schema from source** — `dotnet build` the SDK-style `Microsoft.Build.Sql` project
+     `TimeClockPlus70Core_StandAlone.sqlproj` → DACPAC, then `sqlpackage /Action:Publish` it into
+     `Tcp70ProdTest` (326 tables, 29 views, 64 procs). This replaces `__create-db-prod`.
+  3. **Import the one accepted bootstrap seed** — `sqlpackage /Action:Import` the v6
+     `Tcp60ProdTest.bacpac` (Git-LFS, 17 MB) into `Tcp60ProdTest`. See G1: base data has no
+     from-source origin; the product's own build upgrades this v6 DB into v7.
+  4. **Run the real v6→v7 migration engine on Linux** (`__migrate-db-prod`): `Tcp.UpgradeDatabase.exe`
+     is `net472` and bolted to closed .NET-Framework-only `DMI.TimeClockPlus.*` binaries that P/Invoke
+     Win32 — so it is *built* on Linux (`Upgrade.linux.csproj` / `UpgradeDatabase.linux.csproj`:
+     `Microsoft.NET.Sdk` + `Microsoft.NETFramework.ReferenceAssemblies`, WinForms SDK dropped) and
+     *run* under **Wine 11 + the official MS .NET Framework 4.8** (`docker/_wine`,
+     `docker/_migrate/run-migration.sh`). Mono was tried first and cannot work (no Win32).
+     Result: **SUCCEEDED in 83 s, 0 errors** → 23 companies, 607 employees, 10,616 work segments.
+  5. Create the SQL logins (`tcadmin` sysadmin, `Q3WShUtj8K` = the login the shipped docker
+     `TCPCONN.XML` encrypts; decrypted with the app's own `Cipher` to confirm).
+  6. Gate: `docker/tests/phase1-db.sh` (go-sqlcmd from `webeditionbuilder`).
+  - **Follow-ups (not gating):** `__update-db-prod-test` runs `Tcp.DbuUtilityCmd.exe` (also `net472`
+    → same Wine recipe); `__install-prod-license-files` is a server concern (Phase 2). The
+    `ProdTestResourceGenerator` belongs to the pre-built-*restore* path only (not `stage-dbs`) and
+    currently hits an NRE in its Automations generator — worth fixing for test parity, not for the DB.
+  - **Wine gotchas solved (see memory `wine-quartz-dll-collision`):** the Wine-Mono prompt hangs
+    `wineboot --init` under `xvfb-run` (surfaces as `kernel32.dll c0000135`) → init with
+    `WINEDLLOVERRIDES=mscoree=d;mshtml=d`; and Wine's builtin **DirectShow `quartz.dll` shadows the
+    managed Quartz.NET `Quartz.dll`** (`BadImageFormat: expected to contain an assembly manifest`) →
+    run with `WINEDLLOVERRIDES=quartz=n`.
 
 ```mermaid
 flowchart TD
@@ -212,25 +231,31 @@ flowchart TD
     classDef data fill:#f3e5f5,stroke:#6a1b9a,color:#4a148c;
     classDef opt  fill:#fff3e0,stroke:#e65100,color:#bf360c;
 
-    B["start mcr.microsoft.com/mssql/server:2022"]:::data
-    S1["dotnet build TimeClockPlus70Core.sqlproj<br/>(Microsoft.Build.Sql) → TimeClockPlus70Core.sql"]:::step
-    S2["create DBs from schema SQL<br/>Tcp70ProdTest · Tcp70Report · Core*"]:::step
-    S3["apply deploy/migration scripts<br/>(Execute_Current_Deploy_Scripts → pwsh)"]:::step
-    S4["generate test data<br/>dotnet Tcp.ProdTestResourceGenerator.dll (net10)"]:::step
-    S5["create SQL logins<br/>tcadmin · Q3WShUtj8K"]:::step
-    F["✅ DB built from source, ready on :1433 (SQL auth)"]:::data
-    OPT["(optional) BACKUP DATABASE → .TCB70<br/>reproduce the shipped artifact ourselves"]:::opt
+    classDef wine fill:#ede7f6,stroke:#4527a0,color:#311b92;
+    classDef seed fill:#fff8e1,stroke:#ff8f00,color:#e65100;
 
-    B --> S1 --> S2 --> S3 --> S4 --> S5 --> F
+    B["start mcr.microsoft.com/mssql/server:2022 on we-net"]:::data
+    S1["dotnet build TimeClockPlus70Core_StandAlone.sqlproj<br/>(Microsoft.Build.Sql) → DACPAC"]:::step
+    S2["sqlpackage Publish DACPAC → Tcp70ProdTest<br/>v7 schema: 326 tables · 29 views · 64 procs"]:::step
+    SEED["import the ONE bootstrap seed<br/>sqlpackage Import Tcp60ProdTest.bacpac (v6, LFS)"]:::seed
+    S3["build the net472 migration engine on Linux<br/>Upgrade.linux.csproj + UpgradeDatabase.linux.csproj"]:::step
+    W["run it under Wine 11 + real MS .NET 4.8<br/>Tcp.UpgradeDatabase.exe v6→v7 · WINEDLLOVERRIDES=quartz=n"]:::wine
+    S5["create SQL logins<br/>tcadmin · Q3WShUtj8K"]:::step
+    F["✅ Tcp70ProdTest built from source on :1433<br/>23 companies · 607 employees · 10,616 work segments"]:::data
+    G["tests/phase1-db.sh → PASS"]:::data
+    OPT["follow-ups: Tcp.DbuUtilityCmd (__update-db-prod-test, same Wine recipe)<br/>ProdTestResourceGenerator (restore-path only, NRE)"]:::opt
+
+    B --> S1 --> S2 --> SEED --> S3 --> W --> S5 --> F --> G
     F -.-> OPT
 ```
 
-- **Acceptance — `tests/phase1-db.sh` (CI gate):** with the DB **built from source (no `.bak`
-  restored)**, assert via `go-sqlcmd -S mssql,1433 -U tcadmin -P …`: (a) `Tcp70ProdTest` (+ the other
-  target DBs) appear in `sys.databases`; (b) the `tcadmin`/`Q3WShUtj8K` **SQL-auth logins connect**;
-  (c) **core tables exist and are non-empty** (schema + generated data present) — e.g. a seeded
-  employee-table `COUNT(*)` > 0; (d) a known query returns the expected shape (e.g. the PIN-only
-  employee check returns generated rows). Non-zero on any miss.
+- **Acceptance — `docker/tests/phase1-db.sh` (CI gate) — ✅ PASS (10/10):** with the DB **built from
+  source (no v7 `.bak` restored)**, asserts via `go-sqlcmd -S we-mssql,1433 -U tcadmin -P …` from the
+  `webeditionbuilder` image: (a) `Tcp70ProdTest` in `sys.databases` → 1; (b) the `tcadmin` and
+  `Q3WShUtj8K` **SQL-auth logins connect**; (c) **core tables exist and are non-empty** — Company 23,
+  Employee 607, WorkSegment 10,616, JobCode 267; (d) the known **PIN-only employee** query (`Pin` set,
+  both biometric timestamps NULL) → 8 rows; (e) **no pre-built backup was RESTOREd** —
+  `msdb.dbo.restorehistory` for `Tcp70ProdTest` → 0. Non-zero exit on any miss.
 
 ### Phase 2 — AppServerApi pod ✅
 - **Goal:** the .NET 10 app server running on Linux, talking to the DB pod.
