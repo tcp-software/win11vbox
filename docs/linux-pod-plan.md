@@ -16,8 +16,10 @@ source in a fresh Linux builder image, and hosting the databases and servers as 
 ## 1. Goals & non-goals
 
 **Goals**
-- **G1** — The WebEdition **databases** (`Tcp70ProdTest` and the others) run in a Linux SQL Server
-  container/pod, restored from the artifacts the repo already ships.
+- **G1** — The WebEdition **databases** (`Tcp70ProdTest` and the others) are **built from source** —
+  SSDT schema project → create DB → deploy scripts → generated test data — and run in a Linux SQL
+  Server container/pod. We deliberately do **not** restore the pre-built `.bak`/`.bacpac` snapshots
+  the repo ships (they are cached build outputs; keeping them only as an optional dev-only fast path).
 - **G2** — The WebEdition **servers** run in the same pod, reachable on their ports
   (8008/8010/8012/8014), with a clock/linclock able to connect to `TerminalHubApi` (8010).
 - **G3** — Everything **builds from source in a fresh Linux container** — no Windows, no VM — with
@@ -76,7 +78,7 @@ flowchart TD
 
 | Component | Port | Today | Linux verdict |
 |---|---|---|---|
-| **Databases** (`Tcp70ProdTest`, `Tcp70Report`, `Tcp60*`, base `TimeClockPlus70Core`) | 1433 | SQL Server 2022 | ✅ **Native.** Restore the LFS `.bak` (`.TCB70`) / `.bacpac`; restore SQL uses `InstanceDefaultDataPath` (no `C:\`); no `xp_cmdshell`/FILESTREAM/CLR |
+| **Databases** (`Tcp70ProdTest`, `Tcp70Report`, `Tcp60*`, base `TimeClockPlus70Core`) | 1433 | SQL Server 2022 | ✅ **Native + buildable from source.** SSDT project is SDK-style **`Microsoft.Build.Sql`** (builds on Linux via `dotnet build` — `docker/sql.Dockerfile` already does it); the `ProdTestResourceGenerator` data generator is **`net10.0`** (runs on Linux). Build schema → create DB → deploy → generate (the `stage-dbs` path). No `xp_cmdshell`/FILESTREAM/CLR. (Pre-built LFS `.bak`/`.bacpac` exist but we don't use them.) |
 | **AppServerApi** | 8008 | **.NET 10 / Kestrel** | ✅ **Runs as-is** — already has Linux Dockerfiles (`docker/app.Dockerfile`, `AppServerApi/Dockerfile`) |
 | **AdmServerApi** | 8012 | .NET Fx 4.7.2 + WCF self-host + Asterisk.NET | ⚠️ **Port required** |
 | **TerminalHubApi** | 8010 | .NET Fx 4.7.2 + WCF + native SQLite + device drivers | ⚠️ **Port required** (the clock's endpoint — highest priority) |
@@ -108,10 +110,10 @@ flowchart TD
     IMG["Publishes <b>webeditionbuilder</b> image → ghcr<br/>dotnet 10 SDK · Node · git-lfs ·<br/>go-sqlcmd · sqlpackage"]:::build
     DB1 --> IMG
 
-    TW["<b>tcp-we-70/docker</b> repo<br/>docker-compose.yml (+ k8s manifests) ·<br/>app.Dockerfile · sql restore scripts ·<br/>cfg-docker/TCPCONN.XML (SQL auth)"]:::repo
-    IMG -->|build/restore run inside it| TW
+    TW["<b>tcp-we-70/docker</b> repo<br/>docker-compose.yml (+ k8s manifests) ·<br/>app.Dockerfile · DB build/create scripts ·<br/>cfg-docker/TCPCONN.XML (SQL auth)"]:::repo
+    IMG -->|build + DB-create run inside it| TW
 
-    MSSQL["runtime: <b>mssql :1433</b><br/>restored databases"]:::data
+    MSSQL["runtime: <b>mssql :1433</b><br/>databases built from source"]:::data
     APPC["runtime: <b>AppServerApi :8008</b><br/>(+ ported hubs later)"]:::ok
     TW --> MSSQL
     TW --> APPC
@@ -121,7 +123,7 @@ flowchart TD
   `build-docker-image.sh --build-for-webedition`, `publish-to-ghcr.sh`, a `publish-*.yml` workflow —
   exactly mirroring `clockwarebuilder`/`vmbuilder`/`yoctobuilder`).
 - **`tcp-we-70/docker/`** → the **runtime pod**: the `mssql` service (currently absent from the
-  compose), the app image (`app.Dockerfile`, base bumped 8.0 → 10.0), the DB restore scripts, and the
+  compose), the app image (`app.Dockerfile`, base bumped 8.0 → 10.0), the DB build/create scripts, and the
   `cfg` (already SQL-auth). Later, the ported hub images.
 - **`win11vbox`** (this repo) → **not** a home for the runtime; it stays the VM builder. This plan
   doc lives here only because the initiative grew out of replacing the VM.
@@ -137,7 +139,7 @@ flowchart TD
     classDef base fill:#fff3e0,stroke:#e65100,color:#bf360c;
 
     P0["<b>Phase 0</b> — Groundwork<br/>webeditionbuilder image · Git LFS · compose skeleton"]:::base
-    P1["<b>Phase 1</b> — Database pod<br/>mssql + restore Tcp70ProdTest — ✅ feasible now"]:::now
+    P1["<b>Phase 1</b> — Database pod<br/>mssql + build Tcp70ProdTest from source — ✅ now"]:::now
     P2["<b>Phase 2</b> — AppServerApi pod<br/>.NET 10 / Kestrel — ✅ feasible now"]:::now
     P3["<b>Phase 3</b> — Port legacy servers (dev lift)<br/>TerminalHub → Adm → Workstation"]:::lift
     P4["<b>Phase 4</b> — Pod assembly + clock connectivity<br/>compose → k8s · serverUrl → :8010"]:::now
@@ -155,39 +157,54 @@ Green = achievable with existing pieces; red = genuine development (the .NET Fra
      LTS**, **git + git-lfs**, **go-sqlcmd**/`mssql-tools18`, the **`sqlpackage`** dotnet tool, `pwsh`).
   2. Wire `build-docker-image.sh --build-for-webedition`, `publish-to-ghcr.sh`, and a
      `.github/workflows/publish-webeditionbuilder-ghcr.yml` (mirror the existing three).
-  3. Confirm `git lfs pull` fetches the DB artifacts in `tcp-we-70/server/Etc/Build/Test/` (they are
-     LFS pointers today).
+  3. Ensure `git lfs` is present for any LFS **build inputs** the build genuinely needs (e.g.
+     third-party libs). We do **not** depend on the pre-built `.bak`/`.bacpac` LFS artifacts — Phase 1
+     builds the DB from source.
 - **Acceptance:** `webeditionbuilder` builds, is on ghcr, and inside it `dotnet --version`, `node -v`,
   `git lfs version`, `sqlcmd`/`go-sqlcmd`, and `sqlpackage` all work.
 
-### Phase 1 — Database pod ✅
-- **Goal:** the databases running in Linux SQL Server, restored from the shipped artifacts.
+### Phase 1 — Database pod (built from source) ✅
+- **Goal:** the databases **built from source** (schema → create → deploy → generated data) and running
+  in Linux SQL Server. **No pre-built `.bak`/`.bacpac` restored.** This is the NAnt `stage-dbs` path,
+  ported to Linux.
 - **Steps:**
   1. Add an `mcr.microsoft.com/mssql/server:2022-latest` service to `tcp-we-70/docker/docker-compose.yml`
      (accept EULA, set `MSSQL_SA_PASSWORD`, a data volume).
-  2. Init/entrypoint (in the `webeditionbuilder` or an init container): wait for SQL → create the SQL
-     logins (`tcadmin`, `Q3WShUtj8K`) → **restore** `Tcp70ProdTest` (+ `Tcp70Report`) via `go-sqlcmd`
-     running the repo's `restore-db-prod-test.sql` (`WITH MOVE` already targets `InstanceDefaultDataPath`),
-     **or** `sqlpackage /a:Import` the `.bacpac`. Build base `TimeClockPlus70Core` from its `.sqlproj`
-     via `dotnet build` (as `sql.Dockerfile` already does).
-  3. Replace the Windows wrappers: `-E` → `-U tcadmin -P …`; `.bat`/PowerShell → shell.
+  2. **Build the schema from source** — `dotnet build` the SDK-style `Microsoft.Build.Sql` project
+     `TimeClockPlus70Core_StandAlone.sqlproj` → `TimeClockPlus70Core.sql` (`docker/sql.Dockerfile`
+     already does this on Linux).
+  3. **Create the databases** from that generated schema SQL (`Tcp70ProdTest`, `Tcp70Report`, the
+     `Core*` set) — port `__create-db-*` / `create-db-prod.bat` to a shell script driving `go-sqlcmd`.
+  4. **Apply deploy/migration scripts** — `Execute_Current_Deploy_Scripts.ps1` under `pwsh` on Linux.
+  5. **Generate test data** — run `dotnet Tcp.ProdTestResourceGenerator.dll` (it's `net10.0`) against
+     the new DB.
+  6. Create the SQL logins (`tcadmin`, `Q3WShUtj8K`); wrapper swaps throughout — `sqlcmd -E` (Windows
+     auth) → `go-sqlcmd -U tcadmin -P …`; `.bat`/PowerShell → shell/`pwsh`.
+  7. _(Optional)_ `BACKUP DATABASE … .TCB70` to (re)produce the shipped artifact **ourselves** —
+     proving the from-source build is authoritative (and refreshing the cached snapshot if we keep one).
 
 ```mermaid
 flowchart TD
     classDef step fill:#e8f5e9,stroke:#2e7d32,color:#1b5e20;
     classDef data fill:#f3e5f5,stroke:#6a1b9a,color:#4a148c;
+    classDef opt  fill:#fff3e0,stroke:#e65100,color:#bf360c;
 
-    A["git lfs pull →<br/>Tcp70ProdTest.TCB70 / .bacpac"]:::step
     B["start mcr.microsoft.com/mssql/server:2022"]:::data
-    C["create SQL logins<br/>tcadmin · Q3WShUtj8K"]:::step
-    D["RESTORE DATABASE … WITH MOVE<br/>→ InstanceDefaultDataPath<br/>(or sqlpackage /a:Import .bacpac)"]:::step
-    E["build TimeClockPlus70Core (.sqlproj)<br/>+ apply portable post-restore SQL"]:::step
-    F["✅ DB ready on :1433 (SQL auth)"]:::data
-    A --> B --> C --> D --> E --> F
+    S1["dotnet build TimeClockPlus70Core.sqlproj<br/>(Microsoft.Build.Sql) → TimeClockPlus70Core.sql"]:::step
+    S2["create DBs from schema SQL<br/>Tcp70ProdTest · Tcp70Report · Core*"]:::step
+    S3["apply deploy/migration scripts<br/>(Execute_Current_Deploy_Scripts → pwsh)"]:::step
+    S4["generate test data<br/>dotnet Tcp.ProdTestResourceGenerator.dll (net10)"]:::step
+    S5["create SQL logins<br/>tcadmin · Q3WShUtj8K"]:::step
+    F["✅ DB built from source, ready on :1433 (SQL auth)"]:::data
+    OPT["(optional) BACKUP DATABASE → .TCB70<br/>reproduce the shipped artifact ourselves"]:::opt
+
+    B --> S1 --> S2 --> S3 --> S4 --> S5 --> F
+    F -.-> OPT
 ```
 
-- **Acceptance:** from another container, `go-sqlcmd -S mssql,1433 -U tcadmin -P … -Q "SELECT name FROM
-  sys.databases"` lists `Tcp70ProdTest`; a known query (e.g. the PIN-only employee check) returns rows.
+- **Acceptance:** the DB exists **with no `.bak` restored** — from another container `go-sqlcmd -S
+  mssql,1433 -U tcadmin -P … -Q "SELECT name FROM sys.databases"` lists `Tcp70ProdTest`, and a known
+  query (e.g. the PIN-only employee check) returns generated rows.
 
 ### Phase 2 — AppServerApi pod ✅
 - **Goal:** the .NET 10 app server running on Linux, talking to the DB pod.
@@ -238,7 +255,7 @@ flowchart TD
 - **R2:** device-driver / telephony deps (fingerprint readers, Asterisk) are inherently hardware/OS
   bound — may be stubbed for a dev/linclock pod but block a full production terminal server on Linux.
 - **R3:** SQL Server on Linux feature gaps (no FILESTREAM, some Agent/Windows-auth features) — audited
-  as **not used** by the core restore, but re-verify against `DBATools`/report DBs if those are needed.
+  as **not used** by the core build, but re-verify against `DBATools`/report DBs if those are needed.
 - **R4:** licensing — SQL Server Developer/Express in a container for dev is fine; confirm terms for
   any shared/CI use.
 - **Q1:** do we need **all** databases (report, migration, Tcp60*) or just `Tcp70ProdTest` for the first
