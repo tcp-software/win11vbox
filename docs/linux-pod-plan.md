@@ -145,9 +145,11 @@ flowchart TD
     classDef lift fill:#ffebee,stroke:#c62828,color:#b71c1c;
     classDef base fill:#fff3e0,stroke:#e65100,color:#bf360c;
 
-    P0["<b>Phase 0</b> — Groundwork<br/>webeditionbuilder image · Git LFS · compose skeleton"]:::base
-    P1["<b>Phase 1</b> — Database pod<br/>mssql + build Tcp70ProdTest from source — ✅ now"]:::now
-    P2["<b>Phase 2</b> — AppServerApi pod<br/>.NET 10 / Kestrel — ✅ feasible now"]:::now
+    classDef done fill:#c8e6c9,stroke:#1b5e20,color:#1b5e20,stroke-width:2px;
+
+    P0["<b>Phase 0</b> — Groundwork — ✅ DONE<br/>webeditionbuilder image · gate PASS"]:::done
+    P1["<b>Phase 1</b> — Database pod — ✅ DONE<br/>Tcp70ProdTest from source (v6 seed + Wine migration) · gate PASS"]:::done
+    P2["<b>Phase 2</b> — AppServerApi pod — ▶ now<br/>.NET 10 / Kestrel"]:::now
     P3["<b>Phase 3</b> — Port legacy servers (dev lift)<br/>TerminalHub → Adm → Workstation"]:::lift
     P4["<b>Phase 4</b> — Pod assembly + clock connectivity<br/>compose → k8s · serverUrl → :8010"]:::now
     P5["<b>Phase 5</b> — CI/CD, publish, docs, cutover"]:::base
