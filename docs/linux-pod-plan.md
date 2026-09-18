@@ -155,8 +155,8 @@ flowchart TD
     P1["<b>Phase 1</b> — Database pod — ✅ DONE<br/>Tcp70ProdTest from source (v6 seed + Wine migration) · gate PASS"]:::done
     P2["<b>Phase 2</b> — AppServerApi pod — ✅ DONE<br/>.NET 10 on aspnet:10.0, live SQL session proven · gate PASS"]:::done
     P3["<b>Phase 3</b> — Clock connectivity e2e — ✅ DONE<br/>scripted clock → AppServerApi :8008 → SQL · gate PASS"]:::done
-    P4["<b>Phase 4</b> — Pod assembly + clock connectivity — ▶ now<br/>compose → k8s · serverUrl → :8008"]:::now
-    P5["<b>Phase 5</b> — CI/CD, publish, docs, cutover"]:::base
+    P4["<b>Phase 4</b> — Pod assembly + clock connectivity — ✅ DONE<br/>compose pod · external clock e2e · gate PASS"]:::done
+    P5["<b>Phase 5</b> — CI/CD, publish, docs, cutover — ▶ now"]:::now
     P6["<b>Phase 6</b> — Port legacy servers (deferred dev lift)<br/>TerminalHub → Adm → Workstation"]:::lift
 
     P0 --> P1 --> P2 --> P3 --> P4 --> P5 --> P6
@@ -183,7 +183,7 @@ flowchart TD
     T0 --> P1["Phase 1 ✅"]:::done --> T1["tests/phase1-db.sh<br/>DB from source · logins · 607 employees — PASS"]:::t
     T1 --> P2["Phase 2 ✅"]:::done --> T2["tests/phase2-appserver.sh<br/>:8008 up · live SQL session — PASS"]:::t
     T2 --> P3["Phase 3 ✅"]:::done --> T3["tests/phase3-clock-e2e.sh<br/>clock → :8008 → SQL: register + auth — PASS"]:::t
-    T3 --> P4["Phase 4"]:::ph --> T4["tests/phase4-pod-e2e.sh<br/>whole pod up · device→:8008→DB e2e"]:::t
+    T3 --> P4["Phase 4 ✅"]:::done --> T4["tests/phase4-pod-e2e.sh<br/>pod up · external clock → :8008 → SQL — PASS"]:::t
     T4 --> P5["Phase 5"]:::ph --> T5["CI runs every gate on a clean checkout"]:::t
     T5 --> P6["Phase 6"]:::ph --> T6["tests/phase6-hubs.sh<br/>ported legacy servers on Kestrel (deferred)"]:::t
 ```
@@ -369,17 +369,29 @@ flowchart TD
   under Kestrel, and answers a health/version call on its port. Non-zero if any ported server fails to
   build or start. (The clock-connectivity e2e is Phase 3, already green.)
 
-### Phase 4 — Pod assembly + clock connectivity
+### Phase 4 — Pod assembly + clock connectivity ✅ DONE — `tests/phase4-pod-e2e.sh` PASS
 - **Goal:** a single deployable pod, reachable by devices.
-- **Steps:** finalize `docker-compose.yml` (dev) → **k8s manifests** (mssql + app + hubs, services,
-  volumes); expose the ports; document pointing `tcp-tl-70`/linclock `serverUrl` at the pod (bridged
-  reachability, TLS: `shouldSkipSslValidation` or a pinned self-signed CA for dev).
-- **Acceptance — `tests/phase4-pod-e2e.sh` (CI gate):** bring the whole stack up (`docker compose up
-  -d` or `kubectl apply`, then wait-for-ready on every service), assert all intended ports are
-  reachable (**8008** for the clock, plus 8010/8012/8014 once Phase 6 lands, and 1433 as scoped), run the
-  **full clock e2e from outside the pod** — reuse `docker/clock-e2e` (register + auth via `:8008`→app→SQL;
-  optionally complete the punch confirm chain for a committed `WorkSegment`), then tear down. Self-contained
-  (up → wait → assert → down); non-zero on any failure.
+- **What was built:**
+  - `docker/docker-compose.pod.yml` — the runtime pod: **`we-mssql` (SQL Server 2022) + `we-appserver`
+    (.NET 10 AppServerApi)** on one network (`we-net`, external), mssql **healthcheck-gated**, appserver
+    `depends_on: service_healthy`, clock-reachable on the **published `:8008`** (host port configurable).
+  - `docker/provision-db.sh` — builds `Tcp70ProdTest` **from source** into the pod's mssql (the Phase 1
+    path, parameterized + idempotent): DACPAC publish → v6 seed import → SQL logins → **real v6→v7
+    migration under Wine + .NET 4.8**.
+  - `docker/tests/phase4-pod-e2e.sh` — the self-contained gate.
+- **Acceptance — `docker/tests/phase4-pod-e2e.sh` (CI gate) — ✅ PASS:** `compose up` from a clean volume →
+  `we-mssql` **healthy** → **provision from source** (23 companies) → bring up `we-appserver` on a free host
+  port → it is **reachable from OUTSIDE the pod** (host `:18008`, HTTP 404 on `/` as expected) → run
+  `docker/clock-e2e` **from outside the pod** (`--network host` → published port): `E2E-OK` (login + register
+  + specs + employee auth) → the **registration row is verified in the pod's SQL** → **teardown**
+  (`compose down -v`). Self-contained (up → wait → assert → down); non-zero on any failure.
+  - _K8s manifests_ (mssql + app as a Deployment/StatefulSet + Services) and pointing a physical
+    `tcp-tl-70`/linclock `serverUrl` at the pod (bridged reachability; TLS via `shouldSkipSslValidation`
+    or a pinned dev CA) are the remaining productionization, tracked into Phase 5.
+  - Gotchas fixed: helper mounts must be `$ROOT` (=`tcp-we-70`) not `$ROOT/..`; several host ports are
+    already bound on this box (use a free one, default 18008); `we-net` declared external (gate creates it);
+    a `curl -w '%{http_code}' || echo 000` readiness check double-printed `000000` and false-passed — match
+    `^[1-5][0-9][0-9]$` instead.
 
 ### Phase 5 — CI/CD, publish, docs, cutover
 - **Goal:** repeatable, documented, and the VM demoted to fallback.
