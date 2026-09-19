@@ -1,6 +1,6 @@
 # TimeClock Plus WebEdition on Linux — Migration Plan (VM → Pods)
 
-**Status:** Phases 0–5 COMPLETE (all gates green) · Phase 6 IN PROGRESS — TerminalHubApi ported + runs on Linux (phase6-hubs gate PASS); AdmServerApi + WorkstationHubApi next · **Owner:** _tbd_ · **Last updated:** 2026-09-19
+**Status:** Phases 0–6 COMPLETE — all four WebEdition servers (AppServerApi + the three legacy hubs) build and run on Linux; every gate green · **Owner:** _tbd_ · **Last updated:** 2026-09-19
 
 Move the TimeClock Plus **WebEdition** development/host environment off the Windows 11 VirtualBox VM
 (`win11vbox` / `build-vm.sh`) and onto **Linux containers/pods** — building the whole stack from
@@ -159,7 +159,7 @@ flowchart TD
     P3["<b>Phase 3</b> — Clock connectivity e2e — ✅ DONE<br/>scripted clock → AppServerApi :8008 → SQL · gate PASS"]:::done
     P4["<b>Phase 4</b> — Pod assembly + clock connectivity — ✅ DONE<br/>compose pod · external clock e2e · gate PASS"]:::done
     P5["<b>Phase 5</b> — CI/CD, publish, docs, cutover — ✅ DONE<br/>meta-gate PASS · publish workflows · docs"]:::done
-    P6["<b>Phase 6</b> — Port legacy servers (deferred dev lift) — ▶ next<br/>TerminalHub → Adm → Workstation"]:::lift
+    P6["<b>Phase 6</b> — Port legacy servers — ✅ DONE<br/>TerminalHub · Adm · Workstation on net10/Kestrel · gate PASS"]:::done
 
     P0 --> P1 --> P2 --> P3 --> P4 --> P5 --> P6
 ```
@@ -187,7 +187,7 @@ flowchart TD
     T2 --> P3["Phase 3 ✅"]:::done --> T3["tests/phase3-clock-e2e.sh<br/>clock → :8008 → SQL: register + auth — PASS"]:::t
     T3 --> P4["Phase 4 ✅"]:::done --> T4["tests/phase4-pod-e2e.sh<br/>pod up · external clock → :8008 → SQL — PASS"]:::t
     T4 --> P5["Phase 5 ✅"]:::done --> T5["run-all-gates.sh / linux-pod-ci.yml<br/>every gate on a clean checkout — META-GATE PASS"]:::t
-    T5 --> P6["Phase 6"]:::ph --> T6["tests/phase6-hubs.sh<br/>ported legacy servers on Kestrel (deferred)"]:::t
+    T5 --> P6["Phase 6 ✅"]:::done --> T6["tests/phase6-hubs.sh<br/>TerminalHub/Adm/Workstation on Kestrel — PASS"]:::t
 ```
 
 ### Phase 0 — Groundwork
@@ -376,9 +376,13 @@ flowchart TD
     terminal-hub.xml → `http://we-appserver:8008`). **`tests/phase6-hubs.sh` PASS**: builds on net10,
     starts under Kestrel, answers on `:8010` (HTTP 404 on `/` → host up + controllers discovered), stays
     running. The gate is parameterized for the remaining two hubs.
-  - **Remaining:** same recipe for **AdmServerApi** (:8012, drop `Asterisk.NET`) and **WorkstationHubApi**
-    (:8014, native `SQLite.Interop.dll` → `Microsoft.Data.Sqlite`); optionally restore
-    `UploadFirmwareController` (Web-API-2 multipart) and add the hub to the compose pod + Phase-4 e2e.
+  - ✅ **WorkstationHubApi runs on net10/Linux** (:8014) — `WorkstationHub.linux` + shim; phase6-hubs PASS.
+  - ✅ **AdmServerApi runs on net10/Linux** (:8012) — telephony/Upgrade dropped from `Program.linux.cs`
+    (used only there), so no `TelClockApi`/`Upgrade`/`Asterisk` needed; phase6-hubs PASS.
+  - **All four servers now build + run on Linux.** Remaining follow-ups (non-gating): restore the excluded
+    controllers (TerminalHub `UploadFirmware`; Workstation `EmployeeSessions`; Adm 5 stream/upload — all
+    Web-API-2 multipart/HttpResponseMessage); add the hubs to the compose pod + a Phase-4 e2e leg; port
+    telephony (Asterisk) if TelClock is needed on Linux.
   - ✅ **`TerminalHub` compiles on net10** — `server/Src/Common/TerminalHub/TerminalHub.linux.csproj`
     (`Microsoft.NET.Sdk`, `net10.0`): the closed **DMI.TimeClockPlus.Common** (net472) is referenced via
     HintPath and its terminal-domain types resolve at compile time; added `System.IO.Ports` (`SerialPort`,
