@@ -357,7 +357,23 @@ flowchart TD
     `Data.Linq` references. Shared Windows-build sources stay untouched where possible (`.linux.csproj`
     variants, as in Phase 1).
 
-- **▶ Progress (started):**
+- **▶ Progress:**
+  - ✅ **Shared `Tcp.WebApiHost` lib extracted** — `server/Src/Common/WebApiHost` now holds the net10
+    Kestrel host (`HttpRouteServer`, `Startup`) + Core `AbstractApiController` (+ `AbstractControllerHelper`,
+    `HttpResponseException`, the two action filters), moved out of AppServerApi (namespaces preserved).
+    AppServerApi rebased onto it, **regression-proven** (Phase 4 gate PASS end-to-end). Key fix: the shared
+    `Startup` registers `Assembly.GetEntryAssembly()` as an MVC ApplicationPart, else each server's own
+    controllers aren't discovered (every route 404s).
+  - ✅ **`TerminalHubApi` builds on net10/Linux (0 errors)** —
+    `server/Src/Interface/TerminalHubApi/TerminalHubApi.linux.csproj`: reuses `Tcp.WebApiHost` + references
+    `TerminalHub.linux`; the 22 Web-API-2 controllers compile **unchanged** via a `System.Web.Http` shim
+    (`Http*Attribute` subclasses) + an `ActionName` global alias; the hub base is rebased onto the Core
+    `AbstractApiController` (`.linux` variant); `Program.cs` compiles unchanged (its `Tcp.WebApi`
+    `HttpRouteServer` now resolves to the Kestrel host). `UploadFirmwareController` (Web-API-2 multipart)
+    excluded as an admin-only follow-up. Windows Web-API-2 build untouched (`TerminalHubApi.csproj`).
+  - **Remaining:** run `TerminalHubApi` under Kestrel with a hub cfg (points at AppServerApi `:8008`) →
+    `tests/phase6-hubs.sh` (starts + answers on `:8010`); then the same recipe for **AdmServerApi**
+    (drop `Asterisk.NET`) and **WorkstationHubApi** (native `SQLite.Interop.dll` → `Microsoft.Data.Sqlite`).
   - ✅ **`TerminalHub` compiles on net10** — `server/Src/Common/TerminalHub/TerminalHub.linux.csproj`
     (`Microsoft.NET.Sdk`, `net10.0`): the closed **DMI.TimeClockPlus.Common** (net472) is referenced via
     HintPath and its terminal-domain types resolve at compile time; added `System.IO.Ports` (`SerialPort`,
