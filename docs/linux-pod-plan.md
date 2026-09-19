@@ -70,9 +70,9 @@ flowchart TD
         direction TB
         DB["mssql :1433<br/>Tcp70ProdTest + others"]:::data
         APP["AppServerApi :8008<br/>.NET 10 / Kestrel — runs as-is"]:::ok
-        HUB["TerminalHubApi :8010<br/>needs port (.NET Fx → .NET)"]:::port
-        ADM["AdmServerApi :8012 — needs port"]:::port
-        WS["WorkstationHubApi :8014 — needs port"]:::port
+        HUB["TerminalHubApi :8010<br/>✅ ported to net10/Kestrel"]:::ok
+        ADM["AdmServerApi :8012<br/>✅ ported to net10/Kestrel"]:::ok
+        WS["WorkstationHubApi :8014<br/>✅ ported to net10/Kestrel"]:::ok
         APP --> DB
         HUB --> APP
         ADM --> APP
