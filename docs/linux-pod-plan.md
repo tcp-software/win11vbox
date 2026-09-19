@@ -356,6 +356,24 @@ flowchart TD
     controllers on the Core `AbstractApiController` (+3 helpers); drop the `System.Web*`/`ServiceModel`/
     `Data.Linq` references. Shared Windows-build sources stay untouched where possible (`.linux.csproj`
     variants, as in Phase 1).
+
+- **▶ Progress (started):**
+  - ✅ **`TerminalHub` compiles on net10** — `server/Src/Common/TerminalHub/TerminalHub.linux.csproj`
+    (`Microsoft.NET.Sdk`, `net10.0`): the closed **DMI.TimeClockPlus.Common** (net472) is referenced via
+    HintPath and its terminal-domain types resolve at compile time; added `System.IO.Ports` (`SerialPort`,
+    works on Linux); disabled the net10 analyzers for the legacy port (CA rules net472 never enforced).
+    **Build succeeded, 0 errors.** This retires the biggest unknown (the closed-binary dependency compiles
+    under net10). _Gotcha:_ the vendored `lib/DMI.TimeClockPlus.Common.dll` is Git-LFS — `git lfs pull` it
+    first or RAR resolves a 131-byte pointer and every DMI type reports missing.
+  - **Remaining (bounded, mechanical):** (a) **extract a shared net10 web host** — AppServerApi's
+    `HttpRouteServer`/`Startup` and the Core `AbstractApiController` (+39 helpers) currently live *inside*
+    the AppServerApi Exe; move them to a shared lib so both apps use them; (b) `TerminalHubApi.linux.csproj`
+    (SDK-style net10) referencing `TerminalHub.linux` + the shared host; (c) **rebase the 23 controllers**
+    off Web-API-2 `ApiController` onto the Core base (they are mostly plain — `System.Web.Http` usings only,
+    zero `IHttpActionResult`/`Request.CreateResponse`/`[FromUri]`; just 1 `HttpResponseMessage` in
+    `UploadFirmwareController`); (d) port `Program.cs` to the net10 init pattern; (e) build → run under
+    Kestrel → `tests/phase6-hubs.sh`. Then repeat the same recipe for **AdmServerApi** (drop `Asterisk.NET`
+    telephony) and **WorkstationHubApi** (native `SQLite.Interop.dll` → `Microsoft.Data.Sqlite`).
 - **Steps (per server; TerminalHubApi first — it's the clock's endpoint):**
   1. Retarget csproj `v4.7.2` → `net8/10`; convert to SDK-style + PackageReference.
   2. Replace **WCF `HttpSelfHostServer`** (`Common/WebApi`) with **Kestrel/ASP.NET Core** — build on
