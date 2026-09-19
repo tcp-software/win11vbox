@@ -26,7 +26,9 @@ source in a fresh Linux builder image, and hosting the databases and servers as 
     (`Tcp60ProdTest`) into v7, and that v6 DB only ever comes from the shipped `Tcp60ProdTest.bacpac`
     (17 MB, Git-LFS). We therefore treat that **single v6 seed** as the irreducible bootstrap (like a
     compiler's bootstrap binary): it is imported once, then the v7 schema, migration engine, and
-    generator — **all built/run from source** — produce the final `Tcp70ProdTest`.
+    generator — **all built/run from source** — produce the final `Tcp70ProdTest`. _(Phases 0–5
+    provision `Tcp70ProdTest` — the clock's DB; `Tcp70Report`/`Tcp60*` are the same pattern and are a
+    documented follow-up, not required for the clock e2e.)_
 - **G2** — The WebEdition **servers** run in the same pod, reachable on their ports
   (8008/8010/8012/8014), with a clock/linclock able to connect to **`AppServerApi` (8008)** — *correction
   (Phase 3 sizing):* every endpoint `tcp-tl-70` calls (`clockOperation`, `Biometric`,
