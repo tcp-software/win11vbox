@@ -371,9 +371,14 @@ flowchart TD
     `AbstractApiController` (`.linux` variant); `Program.cs` compiles unchanged (its `Tcp.WebApi`
     `HttpRouteServer` now resolves to the Kestrel host). `UploadFirmwareController` (Web-API-2 multipart)
     excluded as an admin-only follow-up. Windows Web-API-2 build untouched (`TerminalHubApi.csproj`).
-  - **Remaining:** run `TerminalHubApi` under Kestrel with a hub cfg (points at AppServerApi `:8008`) →
-    `tests/phase6-hubs.sh` (starts + answers on `:8010`); then the same recipe for **AdmServerApi**
-    (drop `Asterisk.NET`) and **WorkstationHubApi** (native `SQLite.Interop.dll` → `Microsoft.Data.Sqlite`).
+  - ✅ **`TerminalHubApi` runs under Kestrel on Linux** — `docker/hub.runtime.Dockerfile` (aspnet:10.0) +
+    `docker/_hubcfg` (TerminalHubApi.config host 0.0.0.0:8010; TCPCONN/company-map → we-mssql/PROD;
+    terminal-hub.xml → `http://we-appserver:8008`). **`tests/phase6-hubs.sh` PASS**: builds on net10,
+    starts under Kestrel, answers on `:8010` (HTTP 404 on `/` → host up + controllers discovered), stays
+    running. The gate is parameterized for the remaining two hubs.
+  - **Remaining:** same recipe for **AdmServerApi** (:8012, drop `Asterisk.NET`) and **WorkstationHubApi**
+    (:8014, native `SQLite.Interop.dll` → `Microsoft.Data.Sqlite`); optionally restore
+    `UploadFirmwareController` (Web-API-2 multipart) and add the hub to the compose pod + Phase-4 e2e.
   - ✅ **`TerminalHub` compiles on net10** — `server/Src/Common/TerminalHub/TerminalHub.linux.csproj`
     (`Microsoft.NET.Sdk`, `net10.0`): the closed **DMI.TimeClockPlus.Common** (net472) is referenced via
     HintPath and its terminal-domain types resolve at compile time; added `System.IO.Ports` (`SerialPort`,
