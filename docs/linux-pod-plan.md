@@ -1,6 +1,6 @@
 # TimeClock Plus WebEdition on Linux — Migration Plan (VM → Pods)
 
-**Status:** Phases 0–5 COMPLETE (all gates green) · Phase 6 (legacy server ports) deferred · **Owner:** _tbd_ · **Last updated:** 2026-09-18
+**Status:** Phases 0–5 COMPLETE (all gates green) · Phase 6 IN PROGRESS — TerminalHubApi ported + runs on Linux (phase6-hubs gate PASS); AdmServerApi + WorkstationHubApi next · **Owner:** _tbd_ · **Last updated:** 2026-09-19
 
 Move the TimeClock Plus **WebEdition** development/host environment off the Windows 11 VirtualBox VM
 (`win11vbox` / `build-vm.sh`) and onto **Linux containers/pods** — building the whole stack from
