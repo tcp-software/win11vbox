@@ -1,6 +1,6 @@
 # TimeClock Plus WebEdition on Linux — Migration Plan (VM → Pods)
 
-**Status:** Phases 0–6 COMPLETE — all four WebEdition servers (AppServerApi + the three legacy hubs) build and run on Linux; every gate green · **Owner:** _tbd_ · **Last updated:** 2026-09-19
+**Status:** Phases 0–6 COMPLETE — all four WebEdition servers (AppServerApi + the three legacy hubs) build and run on Linux; every gate green · **Owner:** _tbd_ · **Last updated:** 2026-09-20
 
 Move the TimeClock Plus **WebEdition** development/host environment off the Windows 11 VirtualBox VM
 (`win11vbox` / `build-vm.sh`) and onto **Linux containers/pods** — building the whole stack from
@@ -380,9 +380,18 @@ flowchart TD
   - ✅ **AdmServerApi runs on net10/Linux** (:8012) — telephony/Upgrade dropped from `Program.linux.cs`
     (used only there), so no `TelClockApi`/`Upgrade`/`Asterisk` needed; phase6-hubs PASS.
   - **All four servers now build + run on Linux.** Remaining follow-ups (non-gating): restore the excluded
-    controllers (TerminalHub `UploadFirmware`; Workstation `EmployeeSessions`; Adm 5 stream/upload — all
-    Web-API-2 multipart/HttpResponseMessage); add the hubs to the compose pod + a Phase-4 e2e leg; port
+    controllers (TerminalHub `UploadFirmware`; Workstation `EmployeeSessions`/`UserSelectSubstitute`; Adm
+    `NamespaceMapping` + 4 stream + `UploadLicense` — all Web-API-2 multipart/HttpResponseMessage); port
     telephony (Asterisk) if TelClock is needed on Linux.
+  - **Review pass (2026-09-20, commit `0d0b50b`):** (1) **secrets scrubbed** from committed
+    `docker/_appcfg/AppServerApi.config` — AWS Secrets Manager ARNs, OAuth ClientId/ClientSecret,
+    GoogleMaps/FeatureTrack/SubSearch/UsagePlan blanked (unreachable from the pod; DB uses TCPCONN.XML).
+    _They remain in branch history → the real values must be rotated._ (2) **hub gate strengthened** —
+    `phase6-hubs.sh` now probes a real routed controller action (Adm `AdminSessions/0/Ping`), so a bare
+    Kestrel 404 no longer passes; discovery + the `System.Web.Http` shim + attribute routing are proven.
+    (3) **all three hubs wired into the meta-gate** (`run-all-gates.sh`). (4) PRs consolidated: #5168 closed,
+    **#5169** is the single PR. Correction: AdmServerApi.linux is not a shell — it keeps ManageCompanies,
+    AddEditNamespace, the Database* controllers, AdminHeader, ResourceStream + `.linux` variants.
   - ✅ **`TerminalHub` compiles on net10** — `server/Src/Common/TerminalHub/TerminalHub.linux.csproj`
     (`Microsoft.NET.Sdk`, `net10.0`): the closed **DMI.TimeClockPlus.Common** (net472) is referenced via
     HintPath and its terminal-domain types resolve at compile time; added `System.IO.Ports` (`SerialPort`,
