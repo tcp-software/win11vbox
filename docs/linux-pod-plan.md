@@ -1,6 +1,6 @@
 # TimeClock Plus WebEdition on Linux — Migration Plan (VM → Pods)
 
-**Status:** Phases 0–6 COMPLETE — all four WebEdition servers (AppServerApi + the three legacy hubs) build and run on Linux; every gate green · **Owner:** _tbd_ · **Last updated:** 2026-09-20
+**Status:** Phases 0–6 COMPLETE — all four WebEdition servers (AppServerApi + the three legacy hubs) build and run on Linux; every gate green. **All four server images are published to GHCR** (`ghcr.io/tcp-software/tcp-we-{appserver,terminalhub,workstationhub,admserver}:linux-pod`) and the pod can pull-and-run them instead of building from source. · **Owner:** _tbd_ · **Last updated:** 2026-09-21
 
 Move the TimeClock Plus **WebEdition** development/host environment off the Windows 11 VirtualBox VM
 (`win11vbox` / `build-vm.sh`) and onto **Linux containers/pods** — building the whole stack from
@@ -379,10 +379,12 @@ flowchart TD
   - ✅ **WorkstationHubApi runs on net10/Linux** (:8014) — `WorkstationHub.linux` + shim; phase6-hubs PASS.
   - ✅ **AdmServerApi runs on net10/Linux** (:8012) — telephony/Upgrade dropped from `Program.linux.cs`
     (used only there), so no `TelClockApi`/`Upgrade`/`Asterisk` needed; phase6-hubs PASS.
-  - **All four servers now build + run on Linux.** Remaining follow-ups (non-gating): restore the excluded
-    controllers (TerminalHub `UploadFirmware`; Workstation `EmployeeSessions`/`UserSelectSubstitute`; Adm
-    `NamespaceMapping` + 4 stream + `UploadLicense` — all Web-API-2 multipart/HttpResponseMessage); port
-    telephony (Asterisk) if TelClock is needed on Linux.
+  - **All four servers now build + run on Linux, and all four images are published to GHCR.** Remaining
+    follow-ups (non-gating): restore the excluded controllers (TerminalHub `UploadFirmware`; Workstation
+    `EmployeeSessions`/`UserSelectSubstitute`; Adm `NamespaceMapping` + 4 stream + `UploadLicense` — all
+    Web-API-2 multipart/HttpResponseMessage); add the three hub services to `docker-compose.pod.yml` (they
+    are exercised in the meta-gate and published, but the compose pod still runs only mssql + appserver);
+    port telephony (Asterisk) if TelClock is needed on Linux.
   - **Review pass (2026-09-20, commit `0d0b50b`):** (1) **secrets scrubbed** from committed
     `docker/_appcfg/AppServerApi.config` — AWS Secrets Manager ARNs, OAuth ClientId/ClientSecret,
     GoogleMaps/FeatureTrack/SubSearch/UsagePlan blanked (unreachable from the pod; DB uses TCPCONN.XML).
@@ -392,6 +394,10 @@ flowchart TD
     (3) **all three hubs wired into the meta-gate** (`run-all-gates.sh`). (4) PRs consolidated: #5168 closed,
     **#5169** is the single PR. Correction: AdmServerApi.linux is not a shell — it keeps ManageCompanies,
     AddEditNamespace, the Database* controllers, AdminHeader, ResourceStream + `.linux` variants.
+  - **Publish pass (2026-09-21):** all four server images published to GHCR (see Phase 5); DP fingerprint
+    dlls vendored for WorkstationHub; removed the throwaway `docker/_migrate/pedump.py` + `loadprobe`
+    probes (cleared the Mend Path-Traversal finding). PR #5169 branch updated onto `develop`
+    (`ort` rename-merge resolved the WebApiHost extraction vs develop's edits) and auto-merge armed.
   - ✅ **`TerminalHub` compiles on net10** — `server/Src/Common/TerminalHub/TerminalHub.linux.csproj`
     (`Microsoft.NET.Sdk`, `net10.0`): the closed **DMI.TimeClockPlus.Common** (net472) is referenced via
     HintPath and its terminal-domain types resolve at compile time; added `System.IO.Ports` (`SerialPort`,
@@ -459,13 +465,26 @@ flowchart TD
     (nightly + PRs touching `docker/**` or the ported projects): checks out `tcp-we-70` (LFS) +
     `docker-builder`, pulls-or-builds `webeditionbuilder` + `webedition-wine`, builds the AppServerApi
     runtime from source, runs `run-all-gates.sh`. `GITHUB_TOKEN` reads the private `DMI.*` feed.
-  - **Publish workflows** (the "build → gate → push" pattern, mirroring `clockwarebuilder`):
+  - **Toolchain publish workflows** (the "build → gate → push" pattern, mirroring `clockwarebuilder`):
     `docker-builder/.github/workflows/publish-webeditionbuilder-ghcr.yml` (runs the Phase 0 gate before
     the push) and `tcp-we-70/.github/workflows/publish-webedition-wine-ghcr.yml` (so the pod/CI pull the
-    Wine + .NET 4.8 image instead of rebuilding dotnet48). The images ARE the pod's publishable
-    artifacts; their in-workflow gate is the publish smoke test.
+    Wine + .NET 4.8 image instead of rebuilding dotnet48).
+  - **Server-image publish workflow (2026-09-21):** `tcp-we-70/.github/workflows/publish-webedition-servers-ghcr.yml`
+    — a 4-way matrix builds every server from source (public **mcr .NET SDK 10**, not the private
+    `webeditionbuilder` package, which this repo's `GITHUB_TOKEN` cannot pull) and publishes the runtime
+    images to `ghcr.io/tcp-software/tcp-we-{appserver,terminalhub,workstationhub,admserver}` (tags
+    `linux-pod` + short SHA). `GITHUB_TOKEN` covers both the private `DMI.*` NuGet feed and the GHCR push.
+    _Build note:_ WorkstationHub's DigitalPersona deps (`DPUruNet`/`DPCtlXUru`) are **vendored as dlls via
+    `HintPath` (like DMI)** under `server/Src/Common/WorkstationHub/lib/` because those NuGet packages are
+    not readable by CI `GITHUB_TOKEN`; `WorkstationHubApi.linux` also references them directly (HintPath is
+    not transitive). **All four images verified published.**
+  - **Pull-and-run consumption (the squish path):** `docker/run-pod-from-ghcr.sh` pulls the prebuilt
+    core-server image from GHCR, brings up SQL, provisions once, and runs AppServerApi on `:8008` — no
+    SDK, no compile. `docker-compose.pod.yml` takes an `APPSERVER_IMAGE` override so the same pod pulls
+    instead of building. This is how QA/squish hosts the core server without building from source.
   - **Docs:** `tcp-we-70/docker/README-linux-pod.md` (bring the pod up, point a clock at `:8008`, run the
-    gates) and a pointer from the `win11vbox` README to the pod as the primary Linux path.
+    gates) and a pointer from the `win11vbox` README to the pod as the primary Linux path. PR #5169's
+    description carries the build→publish and consume diagrams plus reviewer pull-and-validate commands.
 - **Acceptance — CI meta-gate — ✅ met (locally green; wired into CI):** on a clean checkout the pipeline
   builds/pulls the images, brings the pod up, provisions from source, and runs **every prior gate in
   order (`phase0` → `phase4`)**; red if any gate fails. The nightly/PR run proves the whole stack
